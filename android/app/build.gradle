@@ -1,0 +1,96 @@
+plugins {
+    id "com.android.application"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader ->
+        localProperties.load(reader)
+    }
+}
+
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+if (flutterVersionCode == null) {
+    flutterVersionCode = '1'
+}
+
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+if (flutterVersionName == null) {
+    flutterVersionName = '1.0'
+}
+
+// versionName 保持纯版本号，不拼接 buildNumber，避免 PackageInfo 重复追加
+
+def keystorePropertiesFile = rootProject.file("app/key.properties")
+def keystoreProperties = new Properties()
+keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+
+android {
+    compileSdkVersion 36
+    ndkVersion = "28.2.13676358"
+    defaultConfig {
+        applicationId "com.weilu.deer"
+        minSdkVersion flutter.minSdkVersion
+        targetSdkVersion 35
+        versionCode flutterVersionCode.toInteger()
+        versionName flutterVersionName
+    }
+
+    signingConfigs {
+        release {
+            keyAlias keystoreProperties['keyAlias']
+            keyPassword keystoreProperties['keyPassword']
+            storeFile file(keystoreProperties['storeFile'])
+            storePassword keystoreProperties['storePassword']
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.release
+        }
+        release {
+            // flutter build apk
+            // Signing with the debug keys for now, so `flutter run --release` works.
+            signingConfig signingConfigs.release
+            // https://github.com/flutter/flutter/issues/47462  #48015
+            // #58967 gradle 4.0.0
+            shrinkResources true
+            zipAlignEnabled true
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    namespace 'com.weilu.deer'
+    lint {
+        disable 'InvalidPackage'
+    }
+
+    // 佳博 SDK2 本地 AAR 依赖需要 flatDir 仓库
+    repositories {
+        flatDir {
+            dirs 'libs'
+        }
+    }
+}
+
+flutter {
+    source '../..'
+}
+
+dependencies {
+    // 佳博 SDK2 及其原生依赖（jzlib 为 jar，随 fileTree 引入）
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation(name: 'sdk2', ext: 'aar')
+    implementation(name: 'serial-port', ext: 'aar')
+    implementation(name: 'jzint', ext: 'aar')
+    implementation(name: 'fimage', ext: 'aar')
+}

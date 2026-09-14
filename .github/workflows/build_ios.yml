@@ -1,0 +1,50 @@
+# GitHub Actions - iOS 云端构建（无需 Mac）
+# 在 GitHub Actions 的 macOS runner 上编译出未签名的 .ipa，
+# Windows 下载 artifact 后用 Sideloadly + Apple ID 签名安装到 iPhone 测试
+#
+# 触发方式:
+#   1. 手动: GitHub 仓库页 -> Actions -> "Build iOS IPA" -> Run workflow
+#   2. 自动: 推送 v 开头的版本 tag（如 git tag v1.0.1.108 && git push --tags）
+
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 安装 Flutter（与本地版本一致）
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.0"
+          cache: true
+
+      - name: 安装依赖
+        run: flutter pub get
+
+      - name: 构建 iOS Release（不签名，无需证书）
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | sed 's/+/./')
+          flutter build ios --release --no-codesign --dart-define=FULL_VERSION=$VERSION
+
+      - name: 封装为 IPA
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | sed 's/+/./')
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -qr "ylx_boss_flutter_${VERSION}.ipa" Payload
+          ls -lh *.ipa
+
+      - name: 上传构建产物（保留30天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ylx_boss_flutter-ios
+          path: ylx_boss_flutter_*.ipa
+          retention-days: 30
