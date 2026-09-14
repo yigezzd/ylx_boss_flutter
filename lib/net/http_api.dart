@@ -8,8 +8,8 @@ class HttpApi {
   // static const String baseUrlYlx = 'http://192.168.8.43:9099/LxSvr/web/'; // 李宇智
   // static const String baseUrlYlx = 'http://192.168.8.62:9099/LxSvr/web/'; // 朱远杰
   // static const String baseUrlYlx = 'http://192.168.8.41:9099/LxSvr/web/'; // 杨潇
-  static const String baseUrlYlx = 'http://dev.bypos.net/LxSvr/web/';
-  // static const String baseUrlYlx = 'https://yun.bypos.net/LxSvr/web/';
+  // static const String baseUrlYlx = 'http://dev.bypos.net/LxSvr/web/';
+  static const String baseUrlYlx = 'https://yun.bypos.net/LxSvr/web/';
 
   /// 获取门店列表（登录第一步）
   static const String getLoginList = 'getLoginList';
