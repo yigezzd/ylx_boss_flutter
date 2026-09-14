@@ -30,6 +30,8 @@
 .pub-cache/
 .pub/
 /build/
+# 云端构建下载的 iOS 安装包
+*.ipa
 
 # Android related
 **/android/**/gradle-wrapper.jar
