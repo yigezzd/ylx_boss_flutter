@@ -220,8 +220,8 @@ class BusinessPageState extends State<BusinessPage> {
   }
 
   // ──────────── 分区标题 ────────────
-  /// 设为 `false` 可隐藏未完成开发的分区/模块，后续放开只需改为 `true`
-  static const bool _hideExtra = false;
+  /// 设为 `true` 可隐藏未完成开发的分区/模块（当前仅履约模块），后续放开只需改为 `false`
+  static const bool _hideExtra = true;
 
   static final List<String> _sectionTitles = [
     '常用功能',
@@ -229,11 +229,11 @@ class BusinessPageState extends State<BusinessPage> {
     '会员',
     '采购',
     '库存',
-    '履约',
+    if (!_hideExtra) '履约',
     '批发',
-    if (!_hideExtra) '连锁',
+    '连锁',
     '财务',
-    if (!_hideExtra) 'WMS',
+    'WMS',
     '管理',
   ];
 
@@ -243,11 +243,11 @@ class BusinessPageState extends State<BusinessPage> {
     _huiyuanList,
     _caigouList,
     _kucunList,
-    _lvyueList,
+    if (!_hideExtra) _lvyueList,
     _pifaList,
-    if (!_hideExtra) _liansuoList,
+    _liansuoList,
     _caiwuList,
-    if (!_hideExtra) _wmsList,
+    _wmsList,
     _guanliList,
   ];
 
