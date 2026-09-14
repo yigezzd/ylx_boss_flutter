@@ -5,8 +5,8 @@
 #   ASC_ISSUER_ID                  App Store Connect API 密钥的 Issuer ID
 #   ASC_KEY_P8                     AuthKey_xxx.p8 文件内容（含 BEGIN/END PRIVATE KEY 行）
 #   APPLE_TEAM_ID                  开发者账号 Team ID（Membership 页可见，10 位）
-#   MATCH_PASSWORD                 证书仓库加密口令（自定义，务必妥善保存）
-#   MATCH_GIT_BASIC_AUTHORIZATION  证书仓库访问凭证：base64("GitHub用户名:PersonalAccessToken")
+#   MATCH_PASSWORD                 证书仓库加密口令（自定义强密码，务必妥善保存）
+#   CERT_REPO_TOKEN                私有证书仓库访问令牌（细粒度 PAT：仅授权 ylx-ios-certs 仓库 Contents 读写）
 #
 # 使用：Actions -> "Release to TestFlight" -> Run workflow
 # 说明：
@@ -70,8 +70,9 @@ jobs:
       - name: 准备签名证书（fastlane match，首次自动创建）
         env:
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          CERT_REPO_TOKEN: ${{ secrets.CERT_REPO_TOKEN }}
         run: |
+          export MATCH_GIT_BASIC_AUTHORIZATION=$(printf 'yigezzd:%s' "$CERT_REPO_TOKEN" | base64)
           fastlane match appstore \
             --api_key_path private_keys/asc_key.json \
             --git_url "$CERT_REPO" \
