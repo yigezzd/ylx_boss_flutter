@@ -76,13 +76,26 @@ jobs:
           printf '%s' "$CERT_REPO_SSH_KEY" > ~/.ssh/cert_repo_key
           chmod 600 ~/.ssh/cert_repo_key
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/cert_repo_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-          fastlane run setup_ci
+
+          # 自建临时钥匙串：登录钥匙串在 CI 上不可用，会导致证书导入后校验失败
+          KEYCHAIN_NAME=ci-signing.keychain
+          KEYCHAIN_PASSWORD=ci-signing-password
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME" || true
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+          security list-keychains -d user -s "$KEYCHAIN_NAME" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$KEYCHAIN_NAME"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME" > /dev/null || true
+
           fastlane match appstore \
             --api_key_path private_keys/asc_key.json \
             --git_url "$CERT_REPO" \
             --git_branch main \
             --app_identifier "$BUNDLE_ID" \
-            --team_id "$TEAM_ID"
+            --team_id "$TEAM_ID" \
+            --keychain_name "$KEYCHAIN_NAME" \
+            --keychain_password "$KEYCHAIN_PASSWORD" \
+            --force false
 
       - name: 配置工程为手动签名（仅本次构建生效，不提交）
         run: |
