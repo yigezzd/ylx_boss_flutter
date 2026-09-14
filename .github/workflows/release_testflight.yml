@@ -6,7 +6,7 @@
 #   ASC_KEY_P8                     AuthKey_xxx.p8 文件内容（含 BEGIN/END PRIVATE KEY 行）
 #   APPLE_TEAM_ID                  开发者账号 Team ID（Membership 页可见，10 位）
 #   MATCH_PASSWORD                 证书仓库加密口令（自定义强密码，务必妥善保存）
-#   CERT_REPO_TOKEN                私有证书仓库访问令牌（细粒度 PAT：仅授权 ylx-ios-certs 仓库 Contents 读写）
+#   CERT_REPO_SSH_KEY              证书仓库部署私钥（已添加为 ylx-ios-certs 仓库的 Deploy Key）
 #
 # 使用：Actions -> "Release to TestFlight" -> Run workflow
 # 说明：
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
 
 env:
-  CERT_REPO: https://github.com/yigezzd/ylx-ios-certs.git
+  CERT_REPO: git@github.com:yigezzd/ylx-ios-certs.git
   BUNDLE_ID: com.lingxi.boss
   ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
   ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -70,9 +70,13 @@ jobs:
       - name: 准备签名证书（fastlane match，首次自动创建）
         env:
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          CERT_REPO_TOKEN: ${{ secrets.CERT_REPO_TOKEN }}
+          CERT_REPO_SSH_KEY: ${{ secrets.CERT_REPO_SSH_KEY }}
         run: |
-          export MATCH_GIT_BASIC_AUTHORIZATION=$(printf 'yigezzd:%s' "$CERT_REPO_TOKEN" | base64)
+          mkdir -p ~/.ssh
+          printf '%s' "$CERT_REPO_SSH_KEY" > ~/.ssh/cert_repo_key
+          chmod 600 ~/.ssh/cert_repo_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/cert_repo_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          fastlane run setup_ci
           fastlane match appstore \
             --api_key_path private_keys/asc_key.json \
             --git_url "$CERT_REPO" \
