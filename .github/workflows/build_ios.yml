@@ -32,7 +32,7 @@ jobs:
       - name: 构建 iOS Release（不签名，无需证书）
         run: |
           VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | sed 's/+/./')
-          flutter build ios --release --no-codesign --dart-define=FULL_VERSION=$VERSION
+          flutter build ios --release --no-codesign --verbose --dart-define=FULL_VERSION=$VERSION
 
       - name: 封装为 IPA
         run: |
