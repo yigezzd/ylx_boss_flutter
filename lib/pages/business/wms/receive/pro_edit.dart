@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_deer/components/select/select_batch.dart';
 import 'package:flutter_deer/components/select/select_location.dart';
 import 'package:flutter_deer/util/math_utils.dart';
@@ -8,7 +9,7 @@ import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 /// WMS 收货商品编辑页（对齐 Vue wms/receiveTakList/proEdit.vue）
 ///
 /// 确认后通过 Navigator.pop 回传：
-/// `{productid, batchlist:[{id,receiptqty,qty,batchno,birthdate,validdate,locationcode,locationid,palletcode}]}`
+/// `{productid, barcode, code, size, unit, batchlist:[{id,receiptqty,qty,batchno,birthdate,validdate,locationcode,locationid,palletcode}]}`
 class WmsReceiveProEditPage extends StatefulWidget {
   const WmsReceiveProEditPage({
     super.key,
@@ -98,13 +99,16 @@ class _WmsReceiveProEditPageState extends State<WmsReceiveProEditPage> {
         _rows.add(_ReceiptRow(
           id: b['id'],
           qty: _num(b['qty']),
-          receiptqty: _num(b['receiptqty'], fallback: b['qty'] ?? b['checkqty']),
+          // 默认收货数对齐 Vue `b.receiptqty || b.qty || b.checkqty || 0`：
+          // 已保存的收货数优先，为 0/空时依次继承批次数量、盘点数量
+          receiptqty: _firstTruthyNum([b['receiptqty'], b['qty'], b['checkqty']]),
           batchno: b['batchno']?.toString() ?? '',
           birthdate: _dateOnly(b['birthdate']),
           validdate: _dateOnly(b['validdate']),
-          locationcode: b['locationcode']?.toString() ?? _item['locationcode']?.toString() ?? '',
-          locationid: b['locationid']?.toString() ?? _item['locationid']?.toString() ?? '',
-          palletcode: b['palletcode']?.toString() ?? b['dataonlyid']?.toString() ?? '',
+          // 货位/托盘对齐 Vue `||` 链：行内值为空时回退商品级默认值
+          locationcode: _firstNonEmpty([b['locationcode'], _item['locationcode']]),
+          locationid: _firstNonEmpty([b['locationid'], _item['locationid']]),
+          palletcode: _firstNonEmpty([b['palletcode'], b['dataonlyid']]),
         ));
       }
     } else {
@@ -122,10 +126,31 @@ class _WmsReceiveProEditPageState extends State<WmsReceiveProEditPage> {
     }
   }
 
-  static num _num(dynamic v, {dynamic fallback}) {
-    final n = num.tryParse(v?.toString() ?? '');
-    if (n != null) return n;
-    return num.tryParse(fallback?.toString() ?? '') ?? 0;
+  static num _num(dynamic v) {
+    return num.tryParse(v?.toString() ?? '') ?? 0;
+  }
+
+  /// 对齐 JS `b.receiptqty || b.qty || b.checkqty || 0` 数量取值链：
+  /// 依次取第一个可解析且非 0 的数量，全部为 0/空时返回 0
+  static num _firstTruthyNum(List<dynamic> candidates) {
+    for (final v in candidates) {
+      if (v == null) continue;
+      final s = v.toString().trim();
+      if (s.isEmpty) continue;
+      final n = num.tryParse(s);
+      if (n == null || n == 0) continue;
+      return n;
+    }
+    return 0;
+  }
+
+  /// 对齐 JS `a || b || ""` 字符串取值链：依次取第一个非空值
+  static String _firstNonEmpty(List<dynamic> candidates) {
+    for (final v in candidates) {
+      final s = v?.toString() ?? '';
+      if (s.isNotEmpty) return s;
+    }
+    return '';
   }
 
   static String _dateOnly(dynamic v) {
@@ -378,9 +403,14 @@ class _WmsReceiveProEditPageState extends State<WmsReceiveProEditPage> {
       }
     }
 
-    // 回传数据给父页（对齐 Vue onProEditDone 回传结构）
+    // 回传数据给父页（对齐 Vue onProEditDone 回传结构）：
+    // 需回传 barcode/code 供父页按 productid + barcode 精准匹配当前规格
     Navigator.pop(context, {
       'productid': _item['productid']?.toString() ?? '',
+      'barcode': _item['barcode']?.toString() ?? '',
+      'code': _item['code']?.toString() ?? '',
+      'size': _item['size']?.toString() ?? '',
+      'unit': _item['unit']?.toString() ?? '',
       'batchlist': _rows
           .map((r) => {
                 'id': r.id,
@@ -622,7 +652,7 @@ class _WmsReceiveProEditPageState extends State<WmsReceiveProEditPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 收货数量
+        // 收货数量（支持手动输入 + 步进器，对齐 Vue tm-stepper fixed=1）
         _fieldRow(
           label: '收货数量',
           child: widget.disabled
@@ -801,6 +831,7 @@ class _WmsReceiveProEditPageState extends State<WmsReceiveProEditPage> {
         ),
         child: Row(
           children: [
+            // 标签：自然宽度左对齐（不截断、不换行），标签与控件间距紧凑
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -809,11 +840,15 @@ class _WmsReceiveProEditPageState extends State<WmsReceiveProEditPage> {
                 Text(
                   label,
                   style: const TextStyle(fontSize: 13, color: Color(0xFF333333)),
+                  maxLines: 1,
                 ),
               ],
             ),
-            const Spacer(),
-            Flexible(child: child),
+            const SizedBox(width: 8),
+            // 控件区：占满剩余空间，内容靠右显示
+            Expanded(
+              child: Align(alignment: Alignment.centerRight, child: child),
+            ),
           ],
         ),
       ),
@@ -821,18 +856,99 @@ class _WmsReceiveProEditPageState extends State<WmsReceiveProEditPage> {
   }
 }
 
-/// 数量步进器（对齐 Vue tm-stepper，fixed=1）
-class _Stepper extends StatelessWidget {
+/// 数量输入器（对齐 Vue tm-stepper，fixed=1）
+///
+/// 中间为可手动输入的文本框，两侧为步进按钮；
+/// 失焦/回车时统一按一位数量格式（formatDecimal(1)）回显并触发变更。
+class _Stepper extends StatefulWidget {
   const _Stepper({
     required this.value,
     required this.min,
     required this.max,
     required this.onChanged,
   });
+
   final num value;
   final num min;
   final num max;
   final ValueChanged<num> onChanged;
+
+  @override
+  State<_Stepper> createState() => _StepperState();
+}
+
+class _StepperState extends State<_Stepper> {
+  late final TextEditingController _controller = TextEditingController(text: _fmt(widget.value));
+  final FocusNode _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(_onFocusChange);
+  }
+
+  @override
+  void didUpdateWidget(covariant _Stepper oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 值由外部（父级限制逻辑）变更时同步回显，避免与输入中的内容冲突
+    if (!_focusNode.hasFocus && widget.value != oldWidget.value) {
+      _controller.text = _fmt(widget.value);
+    }
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// 显示格式与页面其他数量字段统一（保留一位数量小数）
+  static String _fmt(num v) => MathUtils.formatDecimal(1, v);
+
+  void _onFocusChange() {
+    if (!_focusNode.hasFocus) {
+      _commit();
+    }
+  }
+
+  /// 提交输入：解析 + 范围限制 + 统一格式化回显
+  void _commit() {
+    final parsed = num.tryParse(_controller.text.trim());
+    if (parsed == null) {
+      // 非法输入回退为当前值
+      _controller.text = _fmt(widget.value);
+      return;
+    }
+    var next = parsed;
+    if (next < widget.min) {
+      next = widget.min;
+    } else if (next > widget.max) {
+      next = widget.max;
+    }
+    _controller.text = _fmt(next);
+    if (next != widget.value) {
+      widget.onChanged(next);
+    }
+  }
+
+  /// 步进调整：基于输入框当前数值 +1/-1（对齐 tm-stepper）
+  void _step(num delta) {
+    final base = num.tryParse(_controller.text.trim()) ?? widget.value;
+    var next = base + delta;
+    if (next < widget.min) {
+      next = widget.min;
+    } else if (next > widget.max) {
+      next = widget.max;
+    }
+    _controller.text = _fmt(next);
+    if (next != widget.value) {
+      widget.onChanged(next);
+    } else {
+      // 已到边界时刷新按钮禁用态
+      setState(() {});
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -840,7 +956,7 @@ class _Stepper extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         GestureDetector(
-          onTap: value > min ? () => onChanged((value - 1).clamp(min, max)) : null,
+          onTap: widget.value > widget.min ? () => _step(-1) : null,
           child: Container(
             width: 30,
             height: 30,
@@ -852,26 +968,37 @@ class _Stepper extends StatelessWidget {
             child: Icon(
               Icons.remove,
               size: 16,
-              color: value > min ? const Color(0xFF333333) : const Color(0xFFCCCCCC),
+              color: widget.value > widget.min ? const Color(0xFF333333) : const Color(0xFFCCCCCC),
             ),
           ),
         ),
         Container(
-          width: 64,
+          width: 76,
           height: 30,
           margin: const EdgeInsets.symmetric(horizontal: 4),
-          alignment: Alignment.center,
           decoration: BoxDecoration(
             border: Border.all(color: const Color(0xFFDEDEDE)),
             borderRadius: BorderRadius.circular(4),
           ),
-          child: Text(
-            MathUtils.formatDecimal(1, value),
+          child: TextField(
+            controller: _controller,
+            focusNode: _focusNode,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            textAlign: TextAlign.center,
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
+            ],
+            onSubmitted: (_) => _commit(),
             style: const TextStyle(fontSize: 13, color: Color(0xFF333333)),
+            decoration: const InputDecoration(
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(vertical: 6),
+              border: InputBorder.none,
+            ),
           ),
         ),
         GestureDetector(
-          onTap: value < max ? () => onChanged((value + 1).clamp(min, max)) : null,
+          onTap: widget.value < widget.max ? () => _step(1) : null,
           child: Container(
             width: 30,
             height: 30,
@@ -883,7 +1010,7 @@ class _Stepper extends StatelessWidget {
             child: Icon(
               Icons.add,
               size: 16,
-              color: value < max ? const Color(0xFF333333) : const Color(0xFFCCCCCC),
+              color: widget.value < widget.max ? const Color(0xFF333333) : const Color(0xFFCCCCCC),
             ),
           ),
         ),

@@ -258,10 +258,16 @@ class _WmsReceivePalletEditPageState extends State<WmsReceivePalletEditPage> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProEditSheet(
-        item: Map<String, dynamic>.from(item),
-        orderqty: orderqty,
-        disabled: _disabled,
+      builder: (ctx) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免批次号输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: _ProEditSheet(
+          item: Map<String, dynamic>.from(item),
+          orderqty: orderqty,
+          disabled: _disabled,
+        ),
       ),
     );
     if (!mounted) return;
@@ -823,221 +829,228 @@ class _ProEditSheetState extends State<_ProEditSheet> {
         ? _item['barcode'].toString()
         : (_item['code']?.toString() ?? '');
 
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // 标题栏
-          SizedBox(
-            height: 50,
-            child: Row(
-              children: [
-                const SizedBox(width: 48),
-                const Expanded(
-                  child: Text(
-                    '绑定商品',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF111827),
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 48,
-                  child: Center(
-                    child: GestureDetector(
-                      onTap: () => Navigator.pop(context),
-                      child: const Icon(Icons.close, size: 22, color: Color(0xFF6B7280)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1, color: Color(0xFFE5E7EB)),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '$productname${size.isNotEmpty ? '（$size）' : ''}',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF111827),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '条码：$barcode',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                      ),
-                    ),
-                    Text(
-                      '订货数：${MathUtils.formatDecimal(1, widget.orderqty)}',
-                      style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Column(
-              children: [
-                // 数量
-                _sheetRow(
-                  label: '数量',
-                  required: true,
-                  child: widget.disabled
-                      ? Text(
-                          MathUtils.formatDecimal(1, _qty),
-                          style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-                        )
-                      : _SheetStepper(
-                          value: _qty,
-                          min: 0,
-                          max: widget.orderqty,
-                          onChanged: _onQtyChange,
-                        ),
-                ),
-                // 批次号
-                _sheetRow(
-                  label: '批次号',
-                  required: _validflag,
-                  child: widget.disabled
-                      ? Text(
-                          _batchController.text,
-                          style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-                        )
-                      : SizedBox(
-                          width: 160,
-                          child: TextField(
-                            controller: _batchController,
-                            textAlign: TextAlign.right,
-                            decoration: const InputDecoration(
-                              hintText: '请输入',
-                              hintStyle: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
-                              border: InputBorder.none,
-                              isDense: true,
-                              contentPadding: EdgeInsets.zero,
-                            ),
-                            style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-                          ),
-                        ),
-                ),
-                // 生产日期
-                _sheetRow(
-                  label: '生产日期',
-                  required: _validflag,
-                  onTap: widget.disabled ? null : () => _pickDate(isBirthdate: true),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        (_item['birthdate']?.toString() ?? '').isNotEmpty
-                            ? _item['birthdate'].toString()
-                            : (widget.disabled ? '' : '请选择'),
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: (_item['birthdate']?.toString() ?? '').isNotEmpty
-                              ? const Color(0xFF333333)
-                              : const Color(0xFF8B8B8B),
-                        ),
-                      ),
-                      if (!widget.disabled)
-                        const Icon(Icons.chevron_right, size: 18, color: Color(0xFFB7B7B7)),
-                    ],
-                  ),
-                ),
-                // 有效日期
-                _sheetRow(
-                  label: '有效日期',
-                  onTap: widget.disabled ? null : () => _pickDate(isBirthdate: false),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        (_item['validdate']?.toString() ?? '').isNotEmpty
-                            ? _item['validdate'].toString()
-                            : (_validflag ? '由生产日期自动算出' : (widget.disabled ? '' : '请选择')),
-                        style: TextStyle(
-                          fontSize: (_item['validdate']?.toString() ?? '').isNotEmpty ? 14 : 12,
-                          color: (_item['validdate']?.toString() ?? '').isNotEmpty
-                              ? const Color(0xFF333333)
-                              : const Color(0xFF8B8B8B),
-                        ),
-                      ),
-                      if (!widget.disabled)
-                        const Icon(Icons.chevron_right, size: 18, color: Color(0xFFB7B7B7)),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // 底部按钮
-          Padding(
-            padding: EdgeInsets.fromLTRB(
-              16,
-              8,
-              16,
-              MediaQuery.of(context).padding.bottom + 12,
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: Container(
-                      height: 44,
-                      decoration: BoxDecoration(
-                        border: Border.all(color: const Color(0xFFCCCCCC)),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      alignment: Alignment.center,
-                      child: const Text(
-                        '取消',
-                        style: TextStyle(fontSize: 16, color: Color(0xFF333333)),
+    return ConstrainedBox(
+      // 与 chain 弹窗模式一致：限制弹窗最大高度；键盘弹起时可用高度被压缩，
+      // 字段区通过 Flexible 滚动，避免 PDA 小屏 + 软键盘下溢出
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.9),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 标题栏
+            SizedBox(
+              height: 50,
+              child: Row(
+                children: [
+                  const SizedBox(width: 48),
+                  const Expanded(
+                    child: Text(
+                      '绑定商品',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF111827),
                       ),
                     ),
                   ),
-                ),
-                if (!widget.disabled) ...[
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: _confirm,
-                      child: Container(
-                        height: 44,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF006EFF),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        alignment: Alignment.center,
-                        child: const Text(
-                          '确认',
-                          style: TextStyle(fontSize: 16, color: Colors.white),
-                        ),
+                  SizedBox(
+                    width: 48,
+                    child: Center(
+                      child: GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: const Icon(Icons.close, size: 22, color: Color(0xFF6B7280)),
                       ),
                     ),
                   ),
                 ],
-              ],
+              ),
             ),
-          ),
-        ],
+            const Divider(height: 1, color: Color(0xFFE5E7EB)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '$productname${size.isNotEmpty ? '（$size）' : ''}',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF111827),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '条码：$barcode',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                        ),
+                      ),
+                      Text(
+                        '订货数：${MathUtils.formatDecimal(1, widget.orderqty)}',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(
+                  children: [
+                    // 数量
+                    _sheetRow(
+                      label: '数量',
+                      required: true,
+                      child: widget.disabled
+                          ? Text(
+                              MathUtils.formatDecimal(1, _qty),
+                              style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                            )
+                          : _SheetStepper(
+                              value: _qty,
+                              min: 0,
+                              max: widget.orderqty,
+                              onChanged: _onQtyChange,
+                            ),
+                    ),
+                    // 批次号
+                    _sheetRow(
+                      label: '批次号',
+                      required: _validflag,
+                      child: widget.disabled
+                          ? Text(
+                              _batchController.text,
+                              style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                            )
+                          : SizedBox(
+                              width: 160,
+                              child: TextField(
+                                controller: _batchController,
+                                textAlign: TextAlign.right,
+                                decoration: const InputDecoration(
+                                  hintText: '请输入',
+                                  hintStyle: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+                                  border: InputBorder.none,
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                                style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                              ),
+                            ),
+                    ),
+                    // 生产日期
+                    _sheetRow(
+                      label: '生产日期',
+                      required: _validflag,
+                      onTap: widget.disabled ? null : () => _pickDate(isBirthdate: true),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            (_item['birthdate']?.toString() ?? '').isNotEmpty
+                                ? _item['birthdate'].toString()
+                                : (widget.disabled ? '' : '请选择'),
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: (_item['birthdate']?.toString() ?? '').isNotEmpty
+                                  ? const Color(0xFF333333)
+                                  : const Color(0xFF8B8B8B),
+                            ),
+                          ),
+                          if (!widget.disabled)
+                            const Icon(Icons.chevron_right, size: 18, color: Color(0xFFB7B7B7)),
+                        ],
+                      ),
+                    ),
+                    // 有效日期
+                    _sheetRow(
+                      label: '有效日期',
+                      onTap: widget.disabled ? null : () => _pickDate(isBirthdate: false),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            (_item['validdate']?.toString() ?? '').isNotEmpty
+                                ? _item['validdate'].toString()
+                                : (_validflag ? '由生产日期自动算出' : (widget.disabled ? '' : '请选择')),
+                            style: TextStyle(
+                              fontSize: (_item['validdate']?.toString() ?? '').isNotEmpty ? 14 : 12,
+                              color: (_item['validdate']?.toString() ?? '').isNotEmpty
+                                  ? const Color(0xFF333333)
+                                  : const Color(0xFF8B8B8B),
+                            ),
+                          ),
+                          if (!widget.disabled)
+                            const Icon(Icons.chevron_right, size: 18, color: Color(0xFFB7B7B7)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // 底部按钮
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                8,
+                16,
+                MediaQuery.of(context).padding.bottom + 12,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => Navigator.pop(context),
+                      child: Container(
+                        height: 44,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: const Color(0xFFCCCCCC)),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        alignment: Alignment.center,
+                        child: const Text(
+                          '取消',
+                          style: TextStyle(fontSize: 16, color: Color(0xFF333333)),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (!widget.disabled) ...[
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: _confirm,
+                        child: Container(
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF006EFF),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Text(
+                            '确认',
+                            style: TextStyle(fontSize: 16, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

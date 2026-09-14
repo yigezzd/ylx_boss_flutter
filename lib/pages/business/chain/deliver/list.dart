@@ -155,7 +155,7 @@ class _DeliverListPageState extends State<DeliverListPage>
 
     return request(HttpApi.psstockoutFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,

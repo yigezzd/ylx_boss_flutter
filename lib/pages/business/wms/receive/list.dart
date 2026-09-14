@@ -54,7 +54,10 @@ class _WmsReceiveListPageState extends State<WmsReceiveListPage>
   String _filterCreatename = '';
   final List<Map<String, dynamic>> _filterProducts = [];
 
-  int? _activeQuickTimeId;
+  /// 当前选中的快捷时间（0=昨天 1=今天 2=本周 3=本月 4=自定义）
+  /// 默认 4（自定义）：对齐 Vue selectTime.vue 组件 prop timeIndex 默认值，
+  /// 进入页面/筛选面板时“自定义”高亮并展示近 30 天区间
+  int? _activeQuickTimeId = 4;
 
   /// 当前门店信息
   String _storeId = '';
@@ -496,12 +499,12 @@ class _WmsReceiveListPageState extends State<WmsReceiveListPage>
                         Expanded(
                           child: GestureDetector(
                             onTap: () {
-                              // 对齐 Vue resetFn：恢复默认参数
+                              // 对齐 Vue resetFn：恢复默认参数后 selectTimeFn(4) 选中自定义
                               setSheetState(() {
                                 final now = DateTime.now();
                                 tmpStart = now.subtract(const Duration(days: 30));
                                 tmpEnd = now;
-                                tmpActiveQuickTimeId = null;
+                                tmpActiveQuickTimeId = 4;
                                 tmpSupid = '';
                                 tmpSupname = '';
                                 tmpCreateid = '';

@@ -370,6 +370,8 @@ class HttpApi {
   static const String supplierDelete = 'supplierinfo/delete'; // 删除供应商
   static const String supplierGenerateCode = 'supplierinfo/generateCode'; // 生成供应商编码
   static const String supplierTypeGetList = 'suppliertype/getTypeListandCode'; // 供应商分类列表
+  static const String supplierFindSupplierFilesList =
+      'supplierinfo/findSupplierFilesList'; // 供应商证照过期提醒列表
 
   /// 盘点计划
   static const String stockplanFindList = 'stockplan/findList';

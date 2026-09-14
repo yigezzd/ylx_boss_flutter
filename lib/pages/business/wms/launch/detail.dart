@@ -78,12 +78,18 @@ class _WmsLaunchDetailPageState extends State<WmsLaunchDetailPage> {
         // 对齐 Vue：billInfo = {...res, ...billInfo}（路由参数优先）
         _billInfo = <String, dynamic>{...res, ..._billInfo};
 
+        final String billno = _billInfo['billno']?.toString() ?? '';
+
         _detailList
           ..clear()
           ..addAll((res['detaillist'] as List? ?? []).whereType<Map<String, dynamic>>().map((item) {
             item['billflag'] = billflag;
             item['billid'] = billid;
             item['lunchqty'] = item['billqty'] ?? item['qty'];
+            // 对齐 Vue index.vue scanTrayFn: detail.billno = item.billno
+            if (item['billno'] == null || item['billno'].toString().isEmpty) {
+              item['billno'] = billno;
+            }
             return item;
           }));
 
@@ -94,6 +100,10 @@ class _WmsLaunchDetailPageState extends State<WmsLaunchDetailPage> {
             item['billflag'] = billflag;
             item['billid'] = billid;
             item['lunchqty'] = item['billqty'] ?? item['qty'];
+            // mergeDetails 按商品聚合，从父单据注入 billno
+            if (item['billno'] == null || item['billno'].toString().isEmpty) {
+              item['billno'] = billno;
+            }
             return item;
           }));
 

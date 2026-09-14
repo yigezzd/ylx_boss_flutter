@@ -50,9 +50,8 @@ class _AllotEntryListPageState extends State<AllotEntryListPage>
   Timer? _debounce;
 
   // ── 筛选参数（对齐 Vue params） ──
-  String _storeName = '';
+  // 当前登录机构（固定用于 sids 过滤：列表页不提供机构切换，与连锁其他页面保持一致）
   List<int> _sids = [];
-  String _activeStoreId = '';
 
   String _filterCreateid = '';
   String _filterCreatename = '';
@@ -74,7 +73,7 @@ class _AllotEntryListPageState extends State<AllotEntryListPage>
     _endDate = now;
     _startDate = now.subtract(const Duration(days: 30));
 
-    // 默认机构：当前登录机构
+    // 固定按当前登录机构过滤（列表页不提供机构切换）
     try {
       final String storeStr = SpUtil.getString(Constant.store) ?? '';
       if (storeStr.isNotEmpty) {
@@ -82,8 +81,6 @@ class _AllotEntryListPageState extends State<AllotEntryListPage>
         final storeId = storeMap['id']?.toString() ?? '';
         if (storeId.isNotEmpty) {
           _sids = [int.tryParse(storeId) ?? 0];
-          _activeStoreId = storeId;
-          _storeName = storeMap['name']?.toString() ?? '';
         }
       }
     } catch (_) {}
@@ -175,7 +172,7 @@ class _AllotEntryListPageState extends State<AllotEntryListPage>
 
     return request(HttpApi.dbstockinFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,
@@ -213,27 +210,6 @@ class _AllotEntryListPageState extends State<AllotEntryListPage>
     _hasMore = true;
     await _refreshReviewConfig();
     await _loadData();
-  }
-
-  // ── 机构选择 ──
-  Future<void> _selectStore() async {
-    final result = await SelectStorePage.show(
-      context,
-      showAll: true,
-      initialSelectedId: _activeStoreId,
-    );
-    if (result != null && mounted) {
-      setState(() {
-        final storeId = result['storeid']?.toString() ?? '';
-        _activeStoreId = storeId;
-        _sids = storeId.isNotEmpty ? [int.tryParse(storeId) ?? 0] : [];
-        _storeName = result['storename']?.toString() ?? '';
-        _page = 1;
-        _list = [];
-        _hasMore = true;
-      });
-      _loadData();
-    }
   }
 
   // ── 搜索 ──
@@ -733,34 +709,6 @@ class _AllotEntryListPageState extends State<AllotEntryListPage>
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   child: Row(
                     children: [
-                      // 机构选择
-                      GestureDetector(
-                        onTap: _selectStore,
-                        child: Container(
-                          constraints: const BoxConstraints(maxWidth: 110),
-                          height: 36,
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: const Color(0xFFDEDEDE)),
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  _storeName.isNotEmpty ? _storeName : '全部机构',
-                                  style: const TextStyle(fontSize: 13, color: Color(0xFF333333)),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              const SizedBox(width: 2),
-                              const Icon(Icons.arrow_drop_down, size: 18, color: Color(0xFF666666)),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
                       // 搜索框
                       Expanded(
                         child: SizedBox(

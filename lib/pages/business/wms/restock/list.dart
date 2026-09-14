@@ -140,7 +140,7 @@ class _WmsRestockListPageState extends State<WmsRestockListPage> {
     _retParam();
   }
 
-  /// 选择商品（对齐 Vue openProductSelect，单选）
+  /// 选择商品（对齐 Vue openProductSelect：checked=1 && multiple=false → 单选 radio 模式）
   Future<void> _openProductSelect() async {
     final result = await Navigator.push<List<Map<String, dynamic>>>(
       context,
@@ -152,6 +152,8 @@ class _WmsRestockListPageState extends State<WmsRestockListPage> {
             'itemstatusin': '1,2,3,4',
             'itemtypenot': '5,8',
           },
+          // 对齐 Vue openProductSelect：multiple=false，点击 radio 仅保留一个选中项
+          singleSelectMode: true,
         ),
       ),
     );

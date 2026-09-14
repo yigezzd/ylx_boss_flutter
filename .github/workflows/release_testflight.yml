@@ -1,0 +1,112 @@
+# GitHub Actions - iOS 发行构建并上传 TestFlight（无需 Mac）
+#
+# 前置：在仓库 Settings -> Secrets and variables -> Actions 配置以下 Secrets：
+#   ASC_KEY_ID                     App Store Connect API 密钥的 Key ID
+#   ASC_ISSUER_ID                  App Store Connect API 密钥的 Issuer ID
+#   ASC_KEY_P8                     AuthKey_xxx.p8 文件内容（含 BEGIN/END PRIVATE KEY 行）
+#   APPLE_TEAM_ID                  开发者账号 Team ID（Membership 页可见，10 位）
+#   MATCH_PASSWORD                 证书仓库加密口令（自定义，务必妥善保存）
+#   MATCH_GIT_BASIC_AUTHORIZATION  证书仓库访问凭证：base64("GitHub用户名:PersonalAccessToken")
+#
+# 使用：Actions -> "Release to TestFlight" -> Run workflow
+# 说明：
+#   - 签名证书与描述文件由 fastlane match 自动创建，加密存储在私有仓库 CERT_REPO
+#   - 首次运行会自动创建 Apple Distribution 证书 + App Store 描述文件
+#   - 构建号使用 GitHub 运行序号，避免重复上传同版本号被 App Store Connect 拒绝
+#   - 需要先在 App Store Connect 创建好 App 记录（Bundle ID: com.lingxi.boss）
+
+name: Release to TestFlight
+
+on:
+  workflow_dispatch:
+
+env:
+  CERT_REPO: https://github.com/yigezzd/ylx-ios-certs.git
+  BUNDLE_ID: com.lingxi.boss
+  ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+  ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+  ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+  TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 安装 Flutter（与本地版本一致）
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.0"
+          cache: true
+
+      - name: 安装依赖
+        run: flutter pub get
+
+      - name: 安装 fastlane
+        run: gem install fastlane --no-document
+
+      - name: 写入 App Store Connect API 密钥
+        run: |
+          mkdir -p private_keys
+          printf '%s' "$ASC_KEY_P8" > "private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          mkdir -p ~/.appstoreconnect/private_keys
+          cp "private_keys/AuthKey_${ASC_KEY_ID}.p8" ~/.appstoreconnect/private_keys/
+          python3 - <<'PYEOF'
+          import json, os
+          json.dump(
+              {
+                  "key_id": os.environ["ASC_KEY_ID"],
+                  "issuer_id": os.environ["ASC_ISSUER_ID"],
+                  "key": os.environ["ASC_KEY_P8"],
+                  "duration": 1200,
+                  "in_house": False,
+              },
+              open("private_keys/asc_key.json", "w"),
+          )
+          PYEOF
+
+      - name: 准备签名证书（fastlane match，首次自动创建）
+        env:
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+        run: |
+          fastlane match appstore \
+            --api_key_path private_keys/asc_key.json \
+            --git_url "$CERT_REPO" \
+            --git_branch main \
+            --app_identifier "$BUNDLE_ID" \
+            --team_id "$TEAM_ID"
+
+      - name: 配置工程为手动签名（仅本次构建生效，不提交）
+        run: |
+          fastlane run update_code_signing_settings \
+            path:"ios/Runner.xcodeproj" \
+            use_automatic_signing:false \
+            team_id:"$TEAM_ID" \
+            code_sign_identity:"Apple Distribution" \
+            profile_name:"match AppStore $BUNDLE_ID" \
+            bundle_identifier:"$BUNDLE_ID" \
+            targets:Runner
+
+      - name: 构建发行 IPA
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | sed 's/+/./')
+          flutter build ipa --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=FULL_VERSION=$VERSION
+
+      - name: 上传到 TestFlight
+        run: |
+          fastlane pilot upload \
+            --ipa build/ios/ipa/*.ipa \
+            --api_key_path private_keys/asc_key.json \
+            --skip_waiting_for_build_processing true
+
+      - name: 备份 IPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ylx-boss-release-ipa
+          path: build/ios/ipa/*.ipa
+          retention-days: 30

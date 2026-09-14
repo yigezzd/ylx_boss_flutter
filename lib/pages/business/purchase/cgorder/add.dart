@@ -30,6 +30,19 @@ import 'package:sp_util/sp_util.dart';
 
 enum _COAction { none, save, sign, delete, retsign, stop, withdraw, print }
 
+/// 读取登录参数指定 key 的 int 值（对齐 Vue userStore().loginParamResp），
+/// 缺失或解析异常时返回 0
+int _loginParamInt(String key) {
+  try {
+    final cfgStr = SpUtil.getString(Constant.loginParamResp) ?? '';
+    if (cfgStr.isEmpty) return 0;
+    final cfg = jsonDecode(cfgStr) as Map<String, dynamic>;
+    return int.tryParse(cfg[key]?.toString() ?? '0') ?? 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 class PurchaseCgorderAddPage extends StatefulWidget {
   const PurchaseCgorderAddPage({super.key, this.billData});
   final Map<String, dynamic>? billData;
@@ -1026,22 +1039,24 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
           setState(() {
             final qtyVal = double.tryParse((item['quantity'] ?? 1).toString()) ?? 1;
             final pn = double.tryParse(prod['packagenum']?.toString() ?? '') ?? 1;
-            _items.insert(
-                0,
-                _DetailRow()
-                  ..nameController.text =
-                      prod['productname']?.toString() ?? prod['name']?.toString() ?? name
-                  ..qtyController.text = (item['quantity'] ?? 1).toString()
-                  ..priceController.text =
-                      // 对齐 Vue handleProperty：选品场景最新采购价 cgprice 优先，
-                      // 为空/0 时兜底语音解析价，再兜底档案价 price
-                      ((double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0) != 0
-                              ? prod['cgprice']
-                              : (item['price'] ?? prod['price'] ?? 0))
-                          .toString()
-                  ..prodid = prod['prodid']?.toString() ?? prod['productid']?.toString() ?? ''
-                  ..jsQtyController.text = pn > 0 ? (qtyVal / pn).toStringAsFixed(1) : '0'
-                  ..rawData = Map<String, dynamic>.from(prod));
+            final row = _DetailRow()
+              ..nameController.text =
+                  prod['productname']?.toString() ?? prod['name']?.toString() ?? name
+              ..qtyController.text = (item['quantity'] ?? 1).toString()
+              ..priceController.text =
+                  // 对齐 Vue handleProperty：选品场景最新采购价 cgprice 优先，
+                  // 为空/0 时兜底语音解析价，再兜底档案价 price
+                  ((double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0) != 0
+                          ? prod['cgprice']
+                          : (item['price'] ?? prod['price'] ?? 0))
+                      .toString()
+              ..prodid = prod['prodid']?.toString() ?? prod['productid']?.toString() ?? ''
+              ..jsQtyController.text = pn > 0 ? (qtyVal / pn).toStringAsFixed(1) : '0'
+              ..rawData = Map<String, dynamic>.from(prod);
+            // 初始化金额（对齐 Vue handleProperty：amt = qty × price），
+            // 与扫码新建行一致；仅靠消费端兜底会使 row.amt 长期为 null
+            _recalcRow(row);
+            _items.insert(0, row);
           });
           matchCount++;
         } else {
@@ -1180,6 +1195,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
                     : newQty.toStringAsFixed(2);
                 final pn = double.tryParse(existing.rawData?['packagenum']?.toString() ?? '') ?? 1;
                 existing.jsQtyController.text = pn > 0 ? (newQty / pn).toStringAsFixed(1) : '0';
+                // 扫码累加数量视为编辑数量（对齐 Vue writeData）：重置手动金额标记
+                existing.amtManual = false;
                 _recalcRow(existing);
               });
               Toast.show('扫描添加成功');
@@ -1439,7 +1456,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
           // 更新库存
           row.stockqty = double.tryParse(item['stockqty']?.toString() ?? '') ?? 0;
 
-          // 重算金额
+          // 重算金额（刷新价格视为编辑价格，对齐 Vue writeData：重置手动金额标记）
+          row.amtManual = false;
           _recalcRow(row);
         }
       });
@@ -1473,9 +1491,12 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
     return MathUtils.formatDecimal(3, sum);
   }
 
-  /// 提交前同步全部行的 amt（兜底未失焦的数量修改，对齐 Vue writeData 的 amt 重算）
+  /// 提交前同步全部行的 amt（兜底未失焦的数量修改，对齐 Vue writeData 的 amt 重算）：
+  /// 手动修改过金额的行保留其值，除非系统参数 cgAmountRecalculationflag==1 强制重算
   void _syncAllAmt() {
+    final forceRecalc = _loginParamInt('cgAmountRecalculationflag') == 1;
     for (final row in _items) {
+      if (row.amtManual && !forceRecalc) continue;
       final qty = double.tryParse(row.qtyController.text) ?? 0;
       final price = double.tryParse(row.priceController.text) ?? 0;
       row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
@@ -1524,11 +1545,29 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
       map['qty'] = double.tryParse(row.qtyController.text) ?? 1;
       map['giftqty'] = double.tryParse(row.giftQtyController.text) ?? 0;
       map['price'] = double.tryParse(row.priceController.text) ?? 0;
+      // cgprice 同步为修改后的价格（覆盖 rawData 中的档案价），
+      // 保证选择页详情抽屉价格回显/反算使用用户修改值而非档案原价（对齐 instore）
+      map['cgprice'] = map['price'];
       map['amt'] = row.amt ?? 0;
       map['unit'] = map['unit']?.toString() ?? '';
       map['size'] = map['size']?.toString() ?? '';
       return map;
     }).toList();
+  }
+
+  /// 构建商品查询参数（对齐 Vue cgorder/edit.vue mergDataFn）：
+  /// cgpriceflag=1 时选择页价格显示 cgprice（为空或为 0 回退档案进价 price）
+  Map<String, dynamic> _buildMergData() {
+    return {
+      'stockflag': 1,
+      'storeid': _storeid ?? '',
+      'counterid': '',
+      'cgpriceflag': 1,
+      'billsupid': _supid ?? '',
+      'itemstatus': '1,2',
+      'itemstatusin': '1,2',
+      'itemtypenot': '5,8',
+    };
   }
 
   Future<void> _selectProduct({String? initialKeyword, FocusNode? returnFocusNode}) async {
@@ -1547,6 +1586,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
           storeid: _storeid,
           counterid: '',
           billsupid: _supid,
+          mergData: _buildMergData(),
           selectList: _buildSelectList(),
           paramJust: const ['qty', 'jsqty', 'presentqty', 'price', 'amt', 'unit', 'size', 'remark'],
           initialKeyword: initialKeyword,
@@ -1569,21 +1609,33 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
               (r.rawData?['unitonlyid']?.toString() ?? '') == prodUnit &&
               (r.rawData?['sizeonlyid']?.toString() ?? '') == prodSize);
           if (existIndex >= 0) {
+            // 对齐 Vue onSelectProduct 合并语义：选择页返回的行整体替换已有行
+            // （Map 按复合键去重后返回行覆盖旧行，qty/price/amt 均取返回值，不再累加）
             final row = _items[existIndex];
-            final newQty = (double.tryParse(row.qtyController.text) ?? 0) + selectedQty;
-            row.qtyController.text = MathUtils.formatDecimal(1, newQty);
-            final newGiftQty = (double.tryParse(row.giftQtyController.text) ?? 0) + selectedGiftQty;
-            row.giftQtyController.text = MathUtils.formatDecimal(1, newGiftQty);
-            final pn = double.tryParse(row.rawData?['packagenum']?.toString() ?? '') ?? 1;
-            row.jsQtyController.text = pn > 0 ? (newQty / pn).toStringAsFixed(1) : '0';
-            // 同步选择页返回的新价格（用户可能修改了价格，否则统计栏仍按旧价计算）
-            final newPrice =
-                double.tryParse((prod['cgprice'] ?? prod['price'])?.toString() ?? '') ?? 0;
-            if (newPrice > 0) {
-              row.priceController.text = MathUtils.formatDecimal(2, newPrice);
-              if (row.rawData != null) row.rawData!['price'] = newPrice;
-            }
+            // 价格取值（对齐选择页规则）：采购价 cgprice 优先，为空或 0 回退档案进价 price
+            final syncCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+            final newPrice = syncCgprice != 0
+                ? syncCgprice
+                : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
+            row.prodid = prodId;
+            row.nameController.text =
+                prod['productname']?.toString() ?? prod['name']?.toString() ?? '';
+            row.qtyController.text = MathUtils.formatDecimal(1, selectedQty);
+            row.giftQtyController.text = MathUtils.formatDecimal(1, selectedGiftQty);
+            row.priceController.text = MathUtils.formatDecimal(2, newPrice);
+            final pn = double.tryParse(prod['packagenum']?.toString() ?? '') ?? 1;
+            row.jsQtyController.text = pn > 0 ? (selectedQty / pn).toStringAsFixed(1) : '0';
+            row.rawData = Map<String, dynamic>.from(prod);
+            // 替换语义：手动金额状态以返回行为准（旧行手动状态不保留）
+            row.amtManual = false;
             _recalcRow(row);
+            // 优先使用选择页返回的 amt（选择页可能手动修改小计金额，已按参数反算数量）
+            final prodAmt = prod['amt']?.toString();
+            if (prodAmt != null && prodAmt.isNotEmpty) {
+              row.amt = MathUtils.formatDecimalNum(3, double.tryParse(prodAmt) ?? row.amt ?? 0);
+            }
+            // 手动金额标记透传（对齐 Vue _amtManual）
+            if (prod['_amtManual'] == true) row.amtManual = true;
           } else {
             final cgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
             final price =
@@ -1604,6 +1656,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
             if (prodAmt != null && prodAmt.isNotEmpty) {
               row.amt = MathUtils.formatDecimalNum(3, double.tryParse(prodAmt) ?? row.amt ?? 0);
             }
+            // 手动金额标记透传（对齐 Vue _amtManual）
+            if (prod['_amtManual'] == true) row.amtManual = true;
             _items.insert(0, row);
           }
         }
@@ -1628,14 +1682,22 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: raw,
-        initialPrice: double.tryParse(row.priceController.text) ?? 0,
-        initialQty: double.tryParse(row.qtyController.text) ?? 0,
-        initialGiftQty: double.tryParse(row.giftQtyController.text) ?? 0,
-        initialRemark: row.remarkController.text,
-        bsid: _storeid,
-        readOnly: _readOnly,
+      builder: (ctx) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: raw,
+          initialPrice: double.tryParse(row.priceController.text) ?? 0,
+          initialQty: double.tryParse(row.qtyController.text) ?? 0,
+          initialGiftQty: double.tryParse(row.giftQtyController.text) ?? 0,
+          initialAmt: row.amt,
+          initialAmtManual: row.amtManual,
+          initialRemark: row.remarkController.text,
+          bsid: _storeid,
+          readOnly: _readOnly,
+        ),
       ),
     );
     if (result != null && mounted) {
@@ -1664,7 +1726,17 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
         // 同步件数 = 数量 / 包装数
         final pn = double.tryParse(raw['packagenum']?.toString() ?? '') ?? 1;
         row.jsQtyController.text = pn > 0 ? MathUtils.formatDecimal(1, qtyVal / pn) : '0';
-        _recalcRow(row);
+        // 小计金额与手动标记透传（对齐 Vue proDetails writeData key==amt）:
+        // 抽屉内手动修改过金额时保留其值，否则按 qty × price 重算
+        final detailAmtManual = result['_amtManual'] == true;
+        final detailAmtVal = double.tryParse(result['amt']?.toString() ?? '');
+        if (detailAmtManual && detailAmtVal != null) {
+          row.amtManual = true;
+          row.amt = MathUtils.formatDecimalNum(3, detailAmtVal);
+        } else {
+          row.amtManual = false;
+          _recalcRow(row);
+        }
       });
     }
   }
@@ -1672,12 +1744,12 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
   // =================== Build ===================
   bool get _readOnly => _isEdit && !_bolHandle;
 
-  /// 粘性表头区域高度常量
-  static const double _stickyScanHeight = 68.0;
-  static const double _stickyTitleHeight = 40.0;
-  static const double _stickyColumnHeight = 36.0;
-  static const double _stickyMinExtent = _stickyTitleHeight + _stickyColumnHeight;
-  static const double _stickyMaxExtent = _stickyScanHeight + _stickyMinExtent;
+  /// 粘性表头区域高度常量（已迁移至 PinnedHeaderSliver）
+  // static const double _stickyScanHeight = 68.0;
+  // static const double _stickyTitleHeight = 40.0;
+  // static const double _stickyColumnHeight = 36.0;
+  // static const double _stickyMinExtent = _stickyTitleHeight + _stickyColumnHeight;
+  // static const double _stickyMaxExtent = _stickyScanHeight + _stickyMinExtent;
 
   @override
   Widget build(BuildContext context) {
@@ -1745,9 +1817,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
                 ),
               ),
               // ---- 粘性表头：扫描框 + 商品明细标题 + 列头 ----
-              SliverPersistentHeader(
-                pinned: true,
-                delegate: _CgorderStickyDelegate(state: this),
+              PinnedHeaderSliver(
+                child: _buildStickyHeader(),
               ),
               // ---- 明细行列表 ----
               if (_items.isNotEmpty)
@@ -1796,123 +1867,80 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
 
   // =================== 粘性表头 ===================
   Widget _buildStickyHeader() {
-    return Align(
-      alignment: Alignment.topCenter,
-      child: ColoredBox(
-        color: const Color(0xFFF5F5F5),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // 扫描输入框（仅非已审核 + 扫码设备设置显示红外输入时显示）
-            if (!_readOnly && _scanSettings.showInfraredInput) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-                child: _buildScanInput(),
-              ),
-              const SizedBox(height: 4),
-            ],
-            // 商品明细卡片（标题栏 + 列头）
+    return ColoredBox(
+      color: const Color(0xFFF5F5F5),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 扫描输入框（仅非已审核 + 扫码设备设置显示红外输入时显示）
+          if (!_readOnly && _scanSettings.showInfraredInput) ...[
             Padding(
-              padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // 标题 + 操作按钮
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 3,
-                            height: 14,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF006EFF),
-                              borderRadius: BorderRadius.circular(2),
-                            ),
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+              child: _buildScanInput(),
+            ),
+            const SizedBox(height: 4),
+          ],
+          // 商品明细卡片（标题栏 + 列头）
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 标题 + 操作按钮
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 3,
+                          height: 14,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF006EFF),
+                            borderRadius: BorderRadius.circular(2),
                           ),
-                          const SizedBox(width: 8),
-                          const Expanded(
-                            child: Text('商品明细',
-                                style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFF111827))),
+                        ),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text('商品明细',
+                              style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF111827))),
+                        ),
+                        if (!_readOnly) ...[
+                          GestureDetector(
+                            onTap: _toggleSelectMode,
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(_isSelectMode ? Icons.close : Icons.delete_outline,
+                                  size: 17,
+                                  color: _isSelectMode
+                                      ? const Color(0xFF6B7280)
+                                      : const Color(0xFFFF4D4F)),
+                              const SizedBox(width: 2),
+                              Text(_isSelectMode ? '取消' : '删除',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: _isSelectMode
+                                          ? const Color(0xFF6B7280)
+                                          : const Color(0xFFFF4D4F),
+                                      fontWeight: FontWeight.w500)),
+                            ]),
                           ),
-                          if (!_readOnly) ...[
-                            GestureDetector(
-                              onTap: _toggleSelectMode,
-                              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                Icon(_isSelectMode ? Icons.close : Icons.delete_outline,
-                                    size: 17,
-                                    color: _isSelectMode
-                                        ? const Color(0xFF6B7280)
-                                        : const Color(0xFFFF4D4F)),
-                                const SizedBox(width: 2),
-                                Text(_isSelectMode ? '取消' : '删除',
-                                    style: TextStyle(
-                                        fontSize: 12,
-                                        color: _isSelectMode
-                                            ? const Color(0xFF6B7280)
-                                            : const Color(0xFFFF4D4F),
-                                        fontWeight: FontWeight.w500)),
-                              ]),
-                            ),
-                            // TODO: 语音识别按钮暂时隐藏，后续可重新启用
-                            if (false) ...[
-                              const SizedBox(width: 10),
-                              GestureDetector(
-                                onTap: _voiceRecognition,
-                                child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                                  Icon(Icons.mic, size: 16, color: Color(0xFF006EFF)),
-                                  SizedBox(width: 2),
-                                  Text('语音',
-                                      style: TextStyle(
-                                          fontSize: 12,
-                                          color: Color(0xFF006EFF),
-                                          fontWeight: FontWeight.w500)),
-                                ]),
-                              ),
-                            ],
+                          // TODO: 语音识别按钮暂时隐藏，后续可重新启用
+                          if (false) ...[
                             const SizedBox(width: 10),
-                            if (_scanSettings.showCameraButton) ...[
-                              GestureDetector(
-                                onTap: _scanBarcode,
-                                child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                                  BossSvgIcon(svgFile: 'scan.svg', size: 12),
-                                  SizedBox(width: 2),
-                                  Text('扫描',
-                                      style: TextStyle(
-                                          fontSize: 12,
-                                          color: Color(0xFF006EFF),
-                                          fontWeight: FontWeight.w500)),
-                                ]),
-                              ),
-                              const SizedBox(width: 10),
-                            ],
-                            // 固定扫描（Web 调试用，对齐预盘单页面）
-                            //if (Device.isWeb) ...[
-                            //  GestureDetector(
-                            //    onTap: () => _handleScannedBarcode('4891599900019'),
-                            //    child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                            //      Icon(Icons.qr_code, size: 14, color: Color(0xFFFF6B00)),
-                            //      SizedBox(width: 2),
-                            //      Text('固定扫描', style: TextStyle(fontSize: 12, color: Color(0xFFFF6B00), fontWeight: FontWeight.w500)),
-                            //    ]),
-                            //  ),
-                            //  const SizedBox(width: 10),
-                            //],
                             GestureDetector(
-                              onTap: _selectProduct,
+                              onTap: _voiceRecognition,
                               child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                                Icon(Icons.add_circle_outline, size: 16, color: Color(0xFF006EFF)),
+                                Icon(Icons.mic, size: 16, color: Color(0xFF006EFF)),
                                 SizedBox(width: 2),
-                                Text('新增',
+                                Text('语音',
                                     style: TextStyle(
                                         fontSize: 12,
                                         color: Color(0xFF006EFF),
@@ -1920,56 +1948,84 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
                               ]),
                             ),
                           ],
+                          const SizedBox(width: 10),
+                          if (_scanSettings.showCameraButton) ...[
+                            GestureDetector(
+                              onTap: _scanBarcode,
+                              child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                                BossSvgIcon(svgFile: 'scan.svg', size: 12),
+                                SizedBox(width: 2),
+                                Text('扫描',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: Color(0xFF006EFF),
+                                        fontWeight: FontWeight.w500)),
+                              ]),
+                            ),
+                            const SizedBox(width: 10),
+                          ],
+                          GestureDetector(
+                            onTap: _selectProduct,
+                            child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.add_circle_outline, size: 16, color: Color(0xFF006EFF)),
+                              SizedBox(width: 2),
+                              Text('新增',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF006EFF),
+                                      fontWeight: FontWeight.w500)),
+                            ]),
+                          ),
                         ],
-                      ),
+                      ],
                     ),
-                    const Divider(height: 1, color: Color(0xFFE5E7EB)),
-                    // 列头
-                    Container(
-                      color: const Color(0xFFF9FAFB),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      child: const Row(
-                        children: [
-                          Expanded(
-                              flex: 5,
-                              child: Text('商品信息',
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF6B7280),
-                                      fontWeight: FontWeight.w500))),
-                          Expanded(
-                              flex: 3,
-                              child: Text('进价',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF6B7280),
-                                      fontWeight: FontWeight.w500))),
-                          Expanded(
-                              flex: 2,
-                              child: Text('赠送',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF6B7280),
-                                      fontWeight: FontWeight.w500))),
-                          Expanded(
-                              flex: 3,
-                              child: Text('数量',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF6B7280),
-                                      fontWeight: FontWeight.w500))),
-                        ],
-                      ),
+                  ),
+                  const Divider(height: 1, color: Color(0xFFE5E7EB)),
+                  // 列头
+                  Container(
+                    color: const Color(0xFFF9FAFB),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: const Row(
+                      children: [
+                        Expanded(
+                            flex: 5,
+                            child: Text('商品信息',
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF6B7280),
+                                    fontWeight: FontWeight.w500))),
+                        Expanded(
+                            flex: 3,
+                            child: Text('进价',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF6B7280),
+                                    fontWeight: FontWeight.w500))),
+                        Expanded(
+                            flex: 2,
+                            child: Text('赠送',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF6B7280),
+                                    fontWeight: FontWeight.w500))),
+                        Expanded(
+                            flex: 3,
+                            child: Text('数量',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF6B7280),
+                                    fontWeight: FontWeight.w500))),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -2832,7 +2888,11 @@ class _DetailItemState extends State<_DetailItem> {
     final price = MathUtils.formatDecimalNum(2, double.tryParse(_priceCtrl.text) ?? 0);
     final qty = MathUtils.formatDecimalNum(1, double.tryParse(_qtyCtrl.text) ?? 0);
     final giftQty = MathUtils.formatDecimalNum(1, double.tryParse(_giftQtyCtrl.text) ?? 0);
-    widget.row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
+    // 失焦重算（对齐 Vue writeData 收尾）：手动修改过金额的行保留其值，
+    // 除非系统参数 cgAmountRecalculationflag==1 强制按 qty × price 重算
+    if (!widget.row.amtManual || _loginParamInt('cgAmountRecalculationflag') == 1) {
+      widget.row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
+    }
     final raw = widget.row.rawData;
     if (raw != null) {
       raw['price'] = price;
@@ -2935,6 +2995,8 @@ class _DetailItemState extends State<_DetailItem> {
                             inputFormatters: [
                               FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
                             ],
+                            // 对齐 Vue writeData：编辑单价时重置手动金额标记，amt 回归 qty × price
+                            onChanged: (_) => widget.row.amtManual = false,
                             textAlign: TextAlign.center,
                             style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
                             decoration: const InputDecoration(
@@ -2964,6 +3026,8 @@ class _DetailItemState extends State<_DetailItem> {
                             inputFormatters: [
                               FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
                             ],
+                            // 对齐 Vue writeData：编辑赠送数量时重置手动金额标记
+                            onChanged: (_) => widget.row.amtManual = false,
                             textAlign: TextAlign.center,
                             style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
                             decoration: const InputDecoration(
@@ -2993,6 +3057,8 @@ class _DetailItemState extends State<_DetailItem> {
                             inputFormatters: [
                               FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
                             ],
+                            // 对齐 Vue writeData：编辑数量时重置手动金额标记，amt 回归 qty × price
+                            onChanged: (_) => widget.row.amtManual = false,
                             textAlign: TextAlign.center,
                             style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
                             decoration: const InputDecoration(
@@ -3008,13 +3074,14 @@ class _DetailItemState extends State<_DetailItem> {
                         ),
                       ),
                     ]),
-                    // 小计行（失焦确认：以 row.amt 为准，失焦时父页面 setState 保证刷新，避免输入中的小数中间态）
+                    // 小计行（对齐 Vue writeData：手动修改过金额的行显示保留值（row.amt），
+                    // 其余实时按 qty × price 计算；失焦时经 _notifyChange 锁定确认值）
                     ListenableBuilder(
                       listenable: Listenable.merge([_qtyCtrl, _priceCtrl]),
                       builder: (_, __) {
                         final q = double.tryParse(_qtyCtrl.text) ?? 0;
                         final p = double.tryParse(_priceCtrl.text) ?? 0;
-                        final a = widget.row.amt != null
+                        final a = widget.row.amtManual && widget.row.amt != null
                             ? MathUtils.formatDecimal(3, widget.row.amt)
                             : MathUtils.formatDecimal(3, MathUtils.mul(q, p));
                         return Padding(
@@ -3038,6 +3105,10 @@ class _DetailItemState extends State<_DetailItem> {
 /// 明细行数据模型
 class _DetailRow {
   String? prodid;
+
+  /// 小计金额是否被用户手动修改（对齐 Vue writeData 的 _amtManual）：
+  /// true 时保留 amt（不随 qty × price 重算），除非系统参数 cgAmountRecalculationflag==1
+  bool amtManual = false;
   final TextEditingController nameController = TextEditingController();
   final TextEditingController qtyController = TextEditingController(text: '1');
   final FocusNode qtyFocusNode = FocusNode();
@@ -3076,6 +3147,8 @@ class _ProDetailSheet extends StatefulWidget {
     required this.initialPrice,
     required this.initialQty,
     required this.initialGiftQty,
+    this.initialAmt,
+    this.initialAmtManual = false,
     required this.initialRemark,
     this.bsid,
     this.readOnly = false,
@@ -3084,6 +3157,12 @@ class _ProDetailSheet extends StatefulWidget {
   final double initialPrice;
   final double initialQty;
   final double initialGiftQty;
+
+  /// 小计金额初始值：null 时按 qty × price 计算
+  final double? initialAmt;
+
+  /// 小计金额是否被手动修改（对齐 Vue writeData 的 _amtManual）
+  final bool initialAmtManual;
   final String initialRemark;
   final int? bsid;
   final bool readOnly;
@@ -3097,7 +3176,15 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
   late TextEditingController _qtyCtrl;
   late TextEditingController _giftCtrl;
   late TextEditingController _jsQtyCtrl;
+  late TextEditingController _amtCtrl;
   late TextEditingController _remarkCtrl;
+  late final FocusNode _amtFocusNode;
+
+  /// 小计金额是否被用户手动修改（对齐 Vue writeData 的 _amtManual）
+  bool _amtManual = false;
+
+  /// 程序性更新金额标志：避免 _syncAmt 回写文本时误标记手动修改
+  bool _updatingAmt = false;
 
   // 单位/规格状态（对齐 Vue proDetails.vue cgpriceflag 逻辑）
   late String _currentUnit;
@@ -3136,6 +3223,11 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
       text: _packagenum > 0 ? MathUtils.formatDecimal(1, qty / _packagenum) : '0',
     );
     _remarkCtrl = TextEditingController(text: widget.initialRemark);
+    _amtManual = widget.initialAmtManual;
+    final initAmt = widget.initialAmt ??
+        MathUtils.formatDecimalNum(3, MathUtils.mul(widget.initialQty, widget.initialPrice));
+    _amtCtrl = TextEditingController(text: MathUtils.formatDecimal(3, initAmt));
+    _amtFocusNode = FocusNode();
     // 初始化单位/规格状态
     _currentUnit = widget.productData['unit']?.toString() ?? '';
     _currentSize = widget.productData['size']?.toString() ?? '';
@@ -3145,6 +3237,70 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     // 数量变化时同步件数
     _qtyCtrl.addListener(_syncJsQty);
     _jsQtyCtrl.addListener(_syncQtyFromJs);
+    // 价格/数量变化 → 编辑时重置手动金额标记并重算 amt = qty × price（对齐 Vue writeData）
+    _priceCtrl.addListener(_onCalcChanged);
+    _qtyCtrl.addListener(_onCalcChanged);
+    // 金额输入 → 标记手动修改；失焦 → 归一化 + 反算数量（对齐 Vue writeData key==amt）
+    _amtCtrl.addListener(_onAmtChanged);
+    _amtFocusNode.addListener(_onAmtBlur);
+  }
+
+  // ─── 金额联动（对齐 Vue edit.vue writeData）─────────────
+
+  /// 价格/数量变化：编辑数量/单价重置手动金额标记（对齐 Vue writeData 开头
+  /// v._amtManual = false），未手动修改时重算 amt = qty × price
+  void _onCalcChanged() {
+    if (_updatingAmt) return;
+    if (_amtManual) {
+      _amtManual = false;
+      setState(() {});
+    }
+    _syncAmt();
+  }
+
+  /// 用户编辑金额 → 标记手动修改（对齐 Vue writeData key==amt 的 _amtManual）
+  void _onAmtChanged() {
+    if (_updatingAmt) return;
+    _amtManual = true;
+  }
+
+  /// 金额失焦监听：提供失焦确认入口（对齐 Vue writeData key==amt 的 blur）
+  void _onAmtBlur() {
+    if (_amtFocusNode.hasFocus) return;
+    _finalizeAmt();
+  }
+
+  /// 金额确认（失焦/回车/确定前）：归一化精度 + 反算数量 + 系统参数强制重算
+  /// （对齐 Vue writeData key==amt：qty = amt / price；price 为 0 时 qty = 0）
+  void _finalizeAmt() {
+    if (!_amtManual) return;
+    final amt = double.tryParse(_amtCtrl.text) ?? 0;
+    _updatingAmt = true;
+    _amtCtrl.text = MathUtils.formatDecimal(3, amt);
+    _updatingAmt = false;
+    // 反算数量 qty = amt / price（保留 2 位，对齐 Vue writeData key==amt；除零置 0 防 Infinity）
+    final price = double.tryParse(_priceCtrl.text) ?? 0;
+    final double qty = price == 0 ? 0 : MathUtils.divide(amt, price);
+    _updatingAmt = true;
+    _qtyCtrl.text = MathUtils.formatDecimal(2, qty);
+    _updatingAmt = false;
+    // 系统参数 cgAmountRecalculationflag==1：按反算后的 qty × price 强制重算 amt
+    // （对齐 Vue writeData 收尾分支：反算在前、重算在后，与选择页 applyAmtRecalc 顺序一致）
+    if (_loginParamInt('cgAmountRecalculationflag') == 1) {
+      _amtManual = false;
+      _syncAmt();
+      setState(() {});
+    }
+  }
+
+  /// 金额自动重算（对齐 Vue writeData：金额未手动修改时 amt = qty × price）
+  void _syncAmt() {
+    if (_amtManual) return;
+    final q = double.tryParse(_qtyCtrl.text) ?? 0;
+    final p = double.tryParse(_priceCtrl.text) ?? 0;
+    _updatingAmt = true;
+    _amtCtrl.text = MathUtils.formatDecimal(3, MathUtils.mul(q, p));
+    _updatingAmt = false;
   }
 
   void _syncJsQty() {
@@ -3171,6 +3327,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     _qtyCtrl.dispose();
     _giftCtrl.dispose();
     _jsQtyCtrl.dispose();
+    _amtCtrl.dispose();
+    _amtFocusNode.dispose();
     _remarkCtrl.dispose();
     super.dispose();
   }
@@ -3377,10 +3535,15 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                         Expanded(
                           child: ElevatedButton(
                             onPressed: () {
+                              // 金额确认（反算数量）后再取当前值（对齐 Vue writeData key==amt）
+                              _finalizeAmt();
                               Navigator.pop(context, {
                                 'price': double.tryParse(_priceCtrl.text) ?? 0.0,
                                 'qty': double.tryParse(_qtyCtrl.text) ?? 0.0,
                                 'giftqty': double.tryParse(_giftCtrl.text) ?? 0.0,
+                                'amt': MathUtils.formatDecimalNum(
+                                    3, double.tryParse(_amtCtrl.text) ?? 0.0),
+                                '_amtManual': _amtManual,
                                 'remark': _remarkCtrl.text.trim(),
                                 'unit': _currentUnit,
                                 'size': _currentSize,
@@ -3408,39 +3571,44 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     );
   }
 
-  /// 小计金额字段（自动计算 qty × price）
+  /// 小计金额字段（可编辑，对齐 Vue proDetails.vue amt 输入框：
+  /// 手动修改时标记 _amtManual 并在确认后反算数量；未修改时自动按 qty × price 重算）
   Widget _buildAmtField() {
-    return ListenableBuilder(
-      listenable: Listenable.merge([_qtyCtrl, _priceCtrl]),
-      builder: (_, __) {
-        final qty = double.tryParse(_qtyCtrl.text) ?? 0;
-        final price = double.tryParse(_priceCtrl.text) ?? 0;
-        final amt = MathUtils.formatDecimal(3, MathUtils.mul(qty, price));
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Row(
-            children: [
-              const SizedBox(
-                width: 80,
-                child: Text('小计金额',
-                    style: TextStyle(
-                        fontSize: 14, color: Color(0xFF374151), fontWeight: FontWeight.w500)),
-              ),
-              Expanded(
-                child: Text(
-                  amt,
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFFE74C3C),
-                  ),
-                ),
-              ),
-            ],
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('小计金额',
+                style:
+                    TextStyle(fontSize: 14, color: Color(0xFF374151), fontWeight: FontWeight.w500)),
           ),
-        );
-      },
+          Expanded(
+            child: TextField(
+              controller: _amtCtrl,
+              focusNode: _amtFocusNode,
+              readOnly: widget.readOnly,
+              enabled: !widget.readOnly,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*'))],
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFFE74C3C),
+              ),
+              onSubmitted: (_) => _finalizeAmt(),
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
+                hintStyle: TextStyle(fontSize: 14, color: Color(0xFFD1D5DB)),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3750,27 +3918,6 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
 }
 
 /// 粘性表头委托
-class _CgorderStickyDelegate extends SliverPersistentHeaderDelegate {
-  _CgorderStickyDelegate({required this.state});
-  final _PurchaseCgorderAddPageState state;
-
-  @override
-  double get minExtent => _PurchaseCgorderAddPageState._stickyMinExtent;
-
-  @override
-  double get maxExtent => (state._readOnly || !state._scanSettings.showInfraredInput)
-      ? _PurchaseCgorderAddPageState._stickyMinExtent
-      : _PurchaseCgorderAddPageState._stickyMaxExtent;
-
-  @override
-  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
-    return state._buildStickyHeader();
-  }
-
-  @override
-  bool shouldRebuild(covariant _CgorderStickyDelegate oldDelegate) => true;
-}
-
 /// 审批操作弹窗（通过/驳回 + 备注）
 class _ApprovalDialog extends StatefulWidget {
   const _ApprovalDialog({this.defaultFlag = 1});

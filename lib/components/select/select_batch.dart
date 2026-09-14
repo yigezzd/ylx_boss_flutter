@@ -59,10 +59,14 @@ class _SelectBatchSheetState extends State<SelectBatchSheet> {
   List<Map<String, dynamic>> _batchList = [];
   String? _selectedBatchNo;
 
+  /// 列表项的 GlobalKey（按显示索引），用于把当前已选批次滚动到可视区域
+  final Map<int, GlobalKey> _itemKeys = {};
+
   @override
   void initState() {
     super.initState();
-    _selectedBatchNo = widget.initialBatchNo.isNotEmpty ? widget.initialBatchNo : null;
+    // 保留空串选中态：单据批次为空时，命中列表中的“空批次”项
+    _selectedBatchNo = widget.initialBatchNo.trim();
     _loadBatchList();
   }
 
@@ -86,10 +90,36 @@ class _SelectBatchSheetState extends State<SelectBatchSheet> {
         _batchList = list.cast<Map<String, dynamic>>();
         _loading = false;
       });
+      // 数据就绪后把当前已选批次滚动到可视区域，保证选中状态可见
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _selectedBatchNo == null) return;
+        final listIdx = _filteredList
+            .indexWhere((e) => (e['batchno']?.toString() ?? '').trim() == _selectedBatchNo);
+        if (listIdx < 0) return;
+        final displayIdx = listIdx + (_showCurrentRow ? 1 : 0);
+        final key = _itemKeys[displayIdx];
+        if (key?.currentContext == null) return;
+        Scrollable.ensureVisible(
+          key!.currentContext!,
+          alignment: 0.2,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      });
     }).catchError((_) {
       if (!mounted) return;
       setState(() => _loading = false);
     });
+  }
+
+  /// 当前单据批次不在接口可选列表中时，置顶展示一条“当前选择”（对齐单据回显场景）
+  /// 空批次（无批次）不在此列：为空时优先命中列表中的“空批次”项
+  bool get _showCurrentRow {
+    if (_selectedBatchNo == null || _selectedBatchNo!.isEmpty) return false;
+    for (final e in _batchList) {
+      if ((e['batchno']?.toString() ?? '').trim() == _selectedBatchNo) return false;
+    }
+    return true;
   }
 
   List<Map<String, dynamic>> get _filteredList {
@@ -107,6 +137,42 @@ class _SelectBatchSheetState extends State<SelectBatchSheet> {
       if (!mounted) return;
       Navigator.pop(context, item);
     });
+  }
+
+  /// 列表置顶的“当前选择”行：已选批次不在可选项中时的回显占位
+  Widget _buildCurrentRow() {
+    return Container(
+      key: const ValueKey('current_batch_row'),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF0F7FF),
+        border: Border(bottom: BorderSide(color: Color(0xFFF0F0F0))),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.radio_button_checked, size: 22, color: Color(0xFF006EFF)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '批次：$_selectedBatchNo',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Color(0xFF006EFF),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text('当前选择（不在可选项中）',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF7A7A7A))),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -172,23 +238,29 @@ class _SelectBatchSheetState extends State<SelectBatchSheet> {
                   ? const Center(
                       child: CircularProgressIndicator(color: Color(0xFF006EFF)),
                     )
-                  : _filteredList.isEmpty
+                  : _filteredList.isEmpty && !_showCurrentRow
                       ? const Center(
                           child: Text('暂无批次',
                               style: TextStyle(fontSize: 14, color: Color(0xFF9CA3AF))),
                         )
                       : ListView.builder(
-                          itemCount: _filteredList.length,
+                          itemCount: _filteredList.length + (_showCurrentRow ? 1 : 0),
                           padding: EdgeInsets.only(
                             bottom: MediaQuery.of(context).padding.bottom + 12,
                           ),
                           itemBuilder: (ctx, idx) {
-                            final item = _filteredList[idx];
+                            // 当前单据批次不在可选项中时，首位固定展示已选行
+                            if (_showCurrentRow && idx == 0) {
+                              return _buildCurrentRow();
+                            }
+                            final item = _filteredList[idx - (_showCurrentRow ? 1 : 0)];
                             final batchno = item['batchno']?.toString() ?? '';
                             final stockqty =
                                 double.tryParse(item['stockqty']?.toString() ?? '') ?? 0;
-                            final isSelected = _selectedBatchNo == batchno;
+                            final isSelected =
+                                _selectedBatchNo != null && batchno.trim() == _selectedBatchNo;
                             return GestureDetector(
+                              key: _itemKeys.putIfAbsent(idx, GlobalKey.new),
                               onTap: () => _onTapItem(item),
                               behavior: HitTestBehavior.opaque,
                               child: Container(
@@ -213,7 +285,7 @@ class _SelectBatchSheetState extends State<SelectBatchSheet> {
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
                                           Text(
-                                            '批次：$batchno',
+                                            '批次：${batchno.isEmpty ? '无批次' : batchno}',
                                             style: TextStyle(
                                               fontSize: 14,
                                               color: isSelected

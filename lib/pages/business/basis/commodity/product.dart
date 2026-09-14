@@ -518,13 +518,16 @@ class _QuantityControl extends StatelessWidget {
                     TextStyle(fontSize: 18, color: Color(0xFF6B7280), fontWeight: FontWeight.w500)),
           ),
         ),
-        SizedBox(
-          width: 40,
-          height: 32,
-          child: Center(
-            child: Text(value,
-                style: const TextStyle(
-                    fontSize: 14, color: Color(0xFF6B7280), fontWeight: FontWeight.w500)),
+        Flexible(
+          child: SizedBox(
+            height: 32,
+            child: Center(
+              child: Text(value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 14, color: Color(0xFF6B7280), fontWeight: FontWeight.w500)),
+            ),
           ),
         ),
         GestureDetector(

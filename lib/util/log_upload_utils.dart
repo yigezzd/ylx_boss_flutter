@@ -59,8 +59,7 @@ class LogUploadUtils {
       try {
         final String storeStr = SpUtil.getString(Constant.store) ?? '';
         if (storeStr.isNotEmpty) {
-          final Map<String, dynamic> storeMap =
-              jsonDecode(storeStr) as Map<String, dynamic>;
+          final Map<String, dynamic> storeMap = jsonDecode(storeStr) as Map<String, dynamic>;
           acc = storeMap['account']?.toString() ?? '';
           storeCode = storeMap['id']?.toString() ?? '';
         }
@@ -98,8 +97,7 @@ class LogUploadUtils {
 
       // 2. 压缩为 zip
       onProgress?.call('正在压缩日志...');
-      FileLogWriter.instance
-          .writeToFile('开始压缩日志，文件数: ${filesToZip.length}', tag: '日志上传');
+      FileLogWriter.instance.writeToFile('开始压缩日志，文件数: ${filesToZip.length}', tag: '日志上传');
       await _zipFiles(filesToZip, zipFilePath);
       FileLogWriter.instance.writeToFile('压缩完成: $zipFilePath', tag: '日志上传');
 
@@ -126,8 +124,7 @@ class LogUploadUtils {
   // ─────────────── Zip 压缩 ───────────────
 
   /// 将多个日志文件压缩为一个 zip 文件
-  static Future<void> _zipFiles(
-      List<FileSystemEntity> files, String zipPath) async {
+  static Future<void> _zipFiles(List<FileSystemEntity> files, String zipPath) async {
     final archive = Archive();
 
     for (final entity in files) {
@@ -141,6 +138,7 @@ class LogUploadUtils {
 
     // 编码为 zip 字节
     final zipData = ZipEncoder().encode(archive);
+    if (zipData == null) return;
     final file = File(zipPath);
     await file.writeAsBytes(zipData, flush: true);
   }
@@ -158,15 +156,12 @@ class LogUploadUtils {
     try {
       // 1. 连接 FTP 服务器（手动解析 DNS 并优先 IPv4，规避部分模拟器 IPv6 路由不通的问题）
       final addresses = await InternetAddress.lookup(_ftpHost);
-      final ipv4 = addresses
-          .where((a) => a.type == InternetAddressType.IPv4)
-          .toList();
+      final ipv4 = addresses.where((a) => a.type == InternetAddressType.IPv4).toList();
       final targetAddr = ipv4.isNotEmpty ? ipv4.first : addresses.first;
       FileLogWriter.instance.writeToFile(
           'FTP解析 $_ftpHost → [${addresses.map((a) => a.address).join(', ')}]，选用 ${targetAddr.address}',
           tag: '日志上传');
-      cmdSocket = await Socket.connect(targetAddr, _ftpPort,
-          timeout: const Duration(seconds: 15));
+      cmdSocket = await Socket.connect(targetAddr, _ftpPort, timeout: const Duration(seconds: 15));
       FileLogWriter.instance.writeToFile(
           'FTP控制连接已建立: ${cmdSocket.remoteAddress.address}:${cmdSocket.remotePort}',
           tag: '日志上传');
@@ -208,27 +203,23 @@ class LogUploadUtils {
       if (!response.startsWith('227')) return 'FTP PASV失败: $response';
 
       // 解析 PASV 响应中的 IP 和端口
-      final pasvMatch =
-          RegExp(r'\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)').firstMatch(response);
+      final pasvMatch = RegExp(r'\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)').firstMatch(response);
       if (pasvMatch == null) return 'FTP PASV解析失败: $response';
 
       final dataHostRaw =
           '${pasvMatch.group(1)}.${pasvMatch.group(2)}.${pasvMatch.group(3)}.${pasvMatch.group(4)}';
-      final dataPort =
-          int.parse(pasvMatch.group(5)!) * 256 + int.parse(pasvMatch.group(6)!);
+      final dataPort = int.parse(pasvMatch.group(5)!) * 256 + int.parse(pasvMatch.group(6)!);
       // 对齐 Apache Commons Net FTPClient 的 passive NAT workaround（NatServerResolver）：
       // 服务器在 NAT 后时 PASV 会返回内网地址（如 172.18.x.x / 192.168.x.x / 10.x.x.x），
       // 外网客户端无法直连，此时回退使用控制连接的公网地址（commons-net 默认行为）。
-      final dataHost = _isPrivateAddress(dataHostRaw)
-          ? cmdSocket.remoteAddress.address
-          : dataHostRaw;
+      final dataHost =
+          _isPrivateAddress(dataHostRaw) ? cmdSocket.remoteAddress.address : dataHostRaw;
       FileLogWriter.instance.writeToFile(
           'PASV返回 $dataHostRaw:$dataPort，私有地址=${_isPrivateAddress(dataHostRaw)}，数据连接目标 $dataHost:$dataPort',
           tag: '日志上传');
 
       // 6. 连接数据通道
-      dataSocket = await Socket.connect(dataHost, dataPort,
-          timeout: const Duration(seconds: 15));
+      dataSocket = await Socket.connect(dataHost, dataPort, timeout: const Duration(seconds: 15));
 
       // 7. 发送 STOR 命令
       cmdSocket.write('STOR $fileName\r\n');
@@ -272,14 +263,12 @@ class LogUploadUtils {
   /// FTP 响应格式：单行 "NNN text\r\n"；多行 "NNN-...\r\n...NNN text\r\n"。
   /// 以 "NNN "（3位数字+空格）开头的行标志整条响应结束。
   /// 10 秒内无数据则返回已累积内容（可能为空，由调用方判定失败）。
-  static Future<String> _readFtpResponse(
-      StreamIterator<Uint8List> reader) async {
+  static Future<String> _readFtpResponse(StreamIterator<Uint8List> reader) async {
     final buffer = StringBuffer();
     while (true) {
       final bool hasMore;
       try {
-        hasMore =
-            await reader.moveNext().timeout(const Duration(seconds: 10));
+        hasMore = await reader.moveNext().timeout(const Duration(seconds: 10));
       } on TimeoutException {
         break; // 10 秒内无数据
       }

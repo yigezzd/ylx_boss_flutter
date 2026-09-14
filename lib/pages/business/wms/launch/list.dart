@@ -111,7 +111,7 @@ class _WmsLaunchListPageState extends State<WmsLaunchListPage> with SingleTicker
     final params = <String, dynamic>{
       'is_page': 1,
       // 对齐 Vue：按单据按制单时间排序，按商品不排序
-      'field': _activeTab == 0 ? 'createtime' : '',
+      'field': _activeTab == 0 ? 'createtime' : 'billno',
       'type': 'desc',
       'page': _page,
       'pagesize': _pageSize,

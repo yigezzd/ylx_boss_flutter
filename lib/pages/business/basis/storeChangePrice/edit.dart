@@ -1706,7 +1706,7 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
         children: [
           // 调价机构
           _buildFormItem(
-            label: '调价机构',
+            label: '调价机构1',
             onTap: _disabled ? null : _selectStore,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -2149,44 +2149,65 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
           const Spacer(),
           SizedBox(
             width: 100,
-            child: TextField(
-              controller: TextEditingController(text: newVal),
-              enabled: !_disabled,
-              // 键盘弹出时预留滚动余量，确保输入框完整露出不被遮挡
-              scrollPadding: const EdgeInsets.only(bottom: 120),
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              textAlign: TextAlign.right,
-              decoration: InputDecoration(
-                hintText: '请输入',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(4),
-                  borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(4),
-                  borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(4),
-                  borderSide: const BorderSide(color: Color(0xFF006EFF)),
-                ),
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              ),
-              style: const TextStyle(fontSize: 13),
-              // 对齐小程序 v-model：每次输入实时同步到数据，保证保存取到最新值
-              onChanged: (v) {
-                item[newpreice] = v;
-              },
-              onSubmitted: (v) {
-                item[newpreice] = v;
-                _priceBlur(item, newpreice);
-                if (mounted) setState(() {});
-              },
-              onTapOutside: (_) {
-                // 失焦时格式化 + 自动加价（对齐小程序 priceBlur）
-                _priceBlur(item, newpreice);
-                if (mounted) setState(() {});
+            child: Builder(
+              builder: (inputCtx) {
+                return TextField(
+                  controller: TextEditingController(text: newVal),
+                  enabled: !_disabled,
+                  // 键盘弹出时预留滚动余量，确保输入框完整露出不被遮挡
+                  scrollPadding: const EdgeInsets.only(bottom: 120),
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  textAlign: TextAlign.right,
+                  onTap: () {
+                    // 键盘弹出会压缩视口，等键盘动画结束后再滚动到输入框，
+                    // 避免“点击时可见、键盘弹出后被遮挡”的时序问题
+                    Future.delayed(const Duration(milliseconds: 350), () {
+                      if (!inputCtx.mounted) return;
+                      try {
+                        Scrollable.ensureVisible(
+                          inputCtx,
+                          alignment: 0.6,
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeOut,
+                        );
+                      } catch (_) {
+                        // 页面已关闭、widget 已从树中移除（deactivated）时忽略
+                      }
+                    });
+                  },
+                  decoration: InputDecoration(
+                    hintText: '请输入',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(4),
+                      borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(4),
+                      borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(4),
+                      borderSide: const BorderSide(color: Color(0xFF006EFF)),
+                    ),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  ),
+                  style: const TextStyle(fontSize: 13),
+                  // 对齐小程序 v-model：每次输入实时同步到数据，保证保存取到最新值
+                  onChanged: (v) {
+                    item[newpreice] = v;
+                  },
+                  onSubmitted: (v) {
+                    item[newpreice] = v;
+                    _priceBlur(item, newpreice);
+                    if (mounted) setState(() {});
+                  },
+                  onTapOutside: (_) {
+                    // 失焦时格式化 + 自动加价（对齐小程序 priceBlur）
+                    _priceBlur(item, newpreice);
+                    if (mounted) setState(() {});
+                  },
+                );
               },
             ),
           ),

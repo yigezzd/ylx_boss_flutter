@@ -110,8 +110,11 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
   List<Map<String, dynamic>> get _prosumlist =>
       (_query['prosumlist'] as List?)?.cast<Map<String, dynamic>>() ?? [];
 
-  /// 单据收货状态标签（对齐 Vue billReceiptStatus）
+  /// 单据收货状态标签（对齐 Vue billReceiptStatus，并补充 signflag 优先判断）
+  /// signflag==1 表示单据已完成收货（对齐列表页 _status / Vue index 卡片状态），
+  /// 否则按数量判断——避免“完成收货”后因数量未收满仍显示部分收货
   (String, Color) get _billReceiptStatus {
+    if (_query['signflag']?.toString() == '1') return ('已收货', const Color(0xFF00A870));
     final billreceiptqty = double.tryParse(_query['billreceiptqty']?.toString() ?? '') ?? 0;
     final billqty = double.tryParse(_query['billqty']?.toString() ?? '') ?? 0;
     if (billreceiptqty <= 0) return ('待收货', const Color(0xFFD54B5A));
@@ -272,15 +275,24 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
                     .toList()
               })
           .toList();
+      // 预先保存原始 bsid（...res 可能覆盖为 0/''）
+      final originalBsid = _query['bsid'];
       _query = {
         ..._query,
         ...res,
-        'bsid': res['outsid'] ?? res['sid'] ?? _query['bsid'],
+        // 用真值回退对齐 Vue `res.outsid || res.sid || query.value.bsid`
+        // Dart ?? 只检查 null；服务端返回 0 时 Vue 走 fallback 而 Flutter 不走 → bsid 丢失
+        'bsid': (res['outsid']?.toString() ?? '').isNotEmpty
+            ? res['outsid']
+            : (res['sid']?.toString() ?? '').isNotEmpty
+                ? res['sid']
+                : originalBsid,
         'remark': (res['remark']?.toString() ?? '').isNotEmpty ? res['remark'] : localRemark,
         'detaillist': detaillist,
         'prosumlist': prosumlist,
         'palletlist': res['palletlist'] ?? <Map<String, dynamic>>[],
       };
+      debugPrint('bsid=${_query["bsid"]}');
       _remarkController.text = _query['remark']?.toString() ?? '';
       setState(() => _loadingDetail = false);
     } catch (_) {
@@ -289,19 +301,19 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
   }
 
   /// 同步 prosumlist 的 receiptqty（对齐 Vue syncProsumReceiptQty）
+  /// 多规格商品：按 productid + barcode 精准匹配，仅汇总该规格/单位的收货数
   void _syncProsumReceiptQty(List<String> productIds) {
     final prosumlist = _prosumlist;
-    for (final pid in productIds) {
+    for (int pi = 0; pi < prosumlist.length; pi++) {
+      final p = prosumlist[pi];
+      if (!productIds.contains(p['productid']?.toString() ?? '')) continue;
       double totalReceipt = 0;
       for (final d in _detaillist) {
-        if (d['productid']?.toString() == pid) {
+        if (_sameSpec(d, p)) {
           totalReceipt += double.tryParse(d['receiptqty']?.toString() ?? '') ?? 0;
         }
       }
-      final pi = prosumlist.indexWhere((p) => p['productid']?.toString() == pid);
-      if (pi > -1) {
-        prosumlist[pi] = {...prosumlist[pi], 'receiptqty': totalReceipt};
-      }
+      prosumlist[pi] = {...p, 'receiptqty': totalReceipt};
     }
   }
 
@@ -331,6 +343,11 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
       }
     });
 
+    final bsid = _query['bsid']?.toString() ?? '';
+    if (bsid.isEmpty) {
+      Toast.show('仓库信息缺失，请刷新页面重试');
+      return;
+    }
     Toast.show('保存中...', duration: 500);
     try {
       await request(HttpApi.wmsReceiveUpdate, {
@@ -355,6 +372,19 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
     final s = v?.toString() ?? '';
     if (s.isEmpty) return '';
     return s.length >= 10 ? s.substring(0, 10) : s;
+  }
+
+  /// 商品规格标识（对齐 Vue `barcode || code`）：优先条码，条码为空时回退商品编码
+  static String _specKey(Map<String, dynamic> m) {
+    final barcode = m['barcode']?.toString() ?? '';
+    if (barcode.isNotEmpty) return barcode;
+    return m['code']?.toString() ?? '';
+  }
+
+  /// 判定两行是否为同一商品同一规格（productid + barcode 完全一致），
+  /// 多规格商品禁止仅凭 productid 匹配，避免串到其他规格的数据
+  static bool _sameSpec(Map<String, dynamic> a, Map<String, dynamic> b) {
+    return a['productid']?.toString() == b['productid']?.toString() && _specKey(a) == _specKey(b);
   }
 
   // ────────────────────── 扫码 ──────────────────────
@@ -384,8 +414,8 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
       final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
       if (list.isNotEmpty) {
         final item = list[0] as Map<String, dynamic>;
-        final idx = _detaillist
-            .indexWhere((d) => d['productid']?.toString() == item['productid']?.toString());
+        // 多规格商品需按 productid + barcode 精准匹配扫描结果（对齐 Vue scanProFn）
+        final idx = _detaillist.indexWhere((d) => _sameSpec(d, item));
         if (idx > -1) {
           _goProDetail(Map<String, dynamic>.from(_detaillist[idx]));
         } else {
@@ -432,11 +462,23 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
     if (_disabled) {
       // 已收货只读查看
     }
-    // 从 prosumlist 获取该商品完整数据（itemlist 即为该商品的收货明细行）
+    // 从 prosumlist 获取该商品完整数据（对齐 Vue goProDetail）
+    // 多规格商品需按 productid + barcode 精准匹配，避免取到其他规格的数据
     final prosumItem = _prosumlist.firstWhere(
-      (p) => p['productid']?.toString() == item['productid']?.toString(),
+      (p) => _sameSpec(p, item),
       orElse: () => item,
     );
+    // 该规格的收货明细行：优先从 detaillist 按 productid + barcode 过滤（本地最新数据），
+    // 后端返回的 prosumItem.itemlist 冗余包含同 productid 下所有规格的行，不能直接使用
+    final specDetailList = _detaillist.where((d) => _sameSpec(d, item)).toList();
+    final batchlist = (specDetailList.isNotEmpty
+            ? specDetailList
+            : ((prosumItem['itemlist'] as List?) ?? [])
+                .cast<Map<String, dynamic>>()
+                .where((c) => _specKey(c) == _specKey(item))
+                .toList())
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
     final result = await Navigator.push<Map<String, dynamic>>(
       context,
       MaterialPageRoute(
@@ -449,7 +491,8 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
           },
           item: {
             ...prosumItem,
-            'batchlist': (prosumItem['itemlist'] as List?) ?? [],
+            // 传参使用行副本（对齐 Vue deepClone），避免子页面修改影响父页数据
+            'batchlist': batchlist,
           },
           disabled: _disabled,
           palletLocationMap: _palletLocationMap,
@@ -469,8 +512,9 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
     _query['productid'] = productid;
 
     final detaillist = _detaillist;
+    // 多规格商品需按 productid + barcode 精准匹配，仅操作当前规格/单位的记录；
     // 收集被删除的已保存数据 id
-    final oldRows = detaillist.where((d) => d['productid']?.toString() == productid).toList();
+    final oldRows = detaillist.where((d) => _sameSpec(d, data)).toList();
     final newIds =
         batchlist.map((b) => b['id']?.toString() ?? '').where((id) => id.isNotEmpty).toSet();
     for (final row in oldRows) {
@@ -479,11 +523,11 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
         _deletedIdMap[id] = row['productid']?.toString() ?? '';
       }
     }
-    // 获取该商品的原始 detaillist 记录作为基础信息
+    // 获取该商品该规格的原始 detaillist 记录作为基础信息（找不到时回退 prosumlist 同规格行）
     final originalItem = detaillist.firstWhere(
-      (d) => d['productid']?.toString() == productid,
+      (d) => _sameSpec(d, data),
       orElse: () => _prosumlist.firstWhere(
-        (p) => p['productid']?.toString() == productid,
+        (p) => _sameSpec(p, data),
         orElse: () => <String, dynamic>{},
       ),
     );
@@ -493,8 +537,8 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
       final id = r['id']?.toString() ?? '';
       if (id.isNotEmpty) oldRowMap[id] = r;
     }
-    // 移除旧记录，用新的收货行替换
-    final newList = detaillist.where((d) => d['productid']?.toString() != productid).toList();
+    // 仅移除当前规格的旧记录，保留其他规格/单位的记录不受影响
+    final newList = detaillist.where((d) => !_sameSpec(d, data)).toList();
     for (final b in batchlist) {
       final bid = b['id']?.toString() ?? '';
       final oldRow = bid.isNotEmpty ? oldRowMap[bid] : null;
@@ -641,6 +685,11 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
       ),
     );
     if (confirm != true || !mounted) return;
+    final bsid = _query['bsid']?.toString() ?? '';
+    if (bsid.isEmpty) {
+      Toast.show('仓库信息缺失，请刷新页面重试');
+      return;
+    }
     try {
       await request(HttpApi.wmsFinishReceiveTak, {
         ..._query,
@@ -774,38 +823,26 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            // 备注
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Padding(
-                                    padding: EdgeInsets.only(top: 12),
-                                    child: Text(
-                                      '备注',
-                                      style: TextStyle(fontSize: 14, color: Color(0xFF333333)),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: TextField(
-                                      controller: _remarkController,
-                                      enabled: !_disabled,
-                                      maxLines: 2,
-                                      decoration: InputDecoration(
-                                        hintText: _disabled ? '' : '请输入备注',
-                                        hintStyle:
-                                            const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
-                                        border: InputBorder.none,
-                                        isDense: true,
-                                        contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                                      ),
-                                      style:
-                                          const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-                                    ),
-                                  ),
-                                ],
+                            // 备注（多行输入：标签与输入框顶对齐，与其他字段行基线一致）
+                            _buildInfoRow(
+                              label: '备注',
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              child: TextField(
+                                controller: _remarkController,
+                                enabled: !_disabled,
+                                maxLines: 2,
+                                // 输入实时回写 _query['remark']（对齐 Vue v-model.lazy=query.remark），
+                                // 保证 getInfo 刷新/打印等路径取到的备注均为最新输入
+                                onChanged: (v) => _query['remark'] = v,
+                                decoration: InputDecoration(
+                                  hintText: _disabled ? '' : '请输入备注',
+                                  hintStyle:
+                                      const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+                                  border: InputBorder.none,
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                                style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
                               ),
                             ),
                           ],
@@ -973,6 +1010,8 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
     required Widget child,
     bool required = false,
     bool showDivider = false,
+    // 多行输入（如备注）传 start，使标签与输入框首行顶对齐，与其他字段基线一致
+    CrossAxisAlignment crossAxisAlignment = CrossAxisAlignment.center,
   }) {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 14),
@@ -980,14 +1019,30 @@ class _WmsReceiveEditPageState extends State<WmsReceiveEditPage>
         border: showDivider ? const Border(bottom: BorderSide(color: Color(0xFFF0F0F0))) : null,
       ),
       child: Row(
+        crossAxisAlignment: crossAxisAlignment,
         children: [
           SizedBox(
             width: 80,
-            child: Row(
+            // 标签文字固定从列左缘排版；必填星号经 Stack 叠放于文字左外侧，
+            // 不占位推挤文字，保证有无星号字段的标签左缘一致（对齐 SelectFieldItem）
+            child: Stack(
+              clipBehavior: Clip.none,
               children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                ),
                 if (required)
-                  const Text('* ', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
-                Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
+                  const Positioned(
+                    left: -10,
+                    top: 0,
+                    child: Text(
+                      '*',
+                      style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A)),
+                    ),
+                  ),
               ],
             ),
           ),

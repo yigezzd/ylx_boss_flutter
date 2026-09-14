@@ -7,9 +7,8 @@ import 'package:flutter_deer/widgets/my_app_bar.dart';
 /// 打印模板选择页面
 /// 业务逻辑参考 boss 项目 subs/user/businessPrintSet/busBillTemp.vue
 class BillTemplatePage extends StatefulWidget {
-  final String airno;
-
   const BillTemplatePage({super.key, this.airno = ''});
+  final String airno;
 
   @override
   State<BillTemplatePage> createState() => _BillTemplatePageState();
@@ -92,10 +91,7 @@ class _BillTemplatePageState extends State<BillTemplatePage> {
       final data = result['data'];
       if (data is List) {
         setState(() {
-          _templates = data
-              .whereType<Map>()
-              .map((e) => Map<String, dynamic>.from(e))
-              .toList();
+          _templates = data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
         });
       } else {
         setState(() => _templates = []);
@@ -141,8 +137,9 @@ class _BillTemplatePageState extends State<BillTemplatePage> {
                 children: [
                   // 左侧分类列表
                   SizedBox(
-                    width: 120,
-                    child: Container(
+                    // 左侧类别宽度在原 120 基础上增加 1/3（120*4/3=160），避免长分类名截断
+                    width: 160,
+                    child: ColoredBox(
                       color: Colors.white,
                       child: _buildCategoryList(),
                     ),
@@ -150,8 +147,7 @@ class _BillTemplatePageState extends State<BillTemplatePage> {
                   // 右侧模板列表
                   Expanded(
                     child: _loading
-                        ? const Center(
-                            child: CircularProgressIndicator(strokeWidth: 2))
+                        ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
                         : _buildTemplateList(),
                   ),
                 ],
@@ -171,7 +167,7 @@ class _BillTemplatePageState extends State<BillTemplatePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // 分组标题
-            Container(
+            ColoredBox(
               color: isSelected ? const Color(0xFFF6F7FB) : Colors.white,
               child: ExpansionTileTheme(
                 data: const ExpansionTileThemeData(
@@ -182,18 +178,14 @@ class _BillTemplatePageState extends State<BillTemplatePage> {
                   key: ValueKey('cat_$idx'),
                   initiallyExpanded: isSelected,
                   shape: const Border(),
-                  tilePadding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                  tilePadding: const EdgeInsets.symmetric(horizontal: 12),
                   childrenPadding: EdgeInsets.zero,
                   title: Text(
                     cat.name,
                     style: TextStyle(
                       fontSize: 13,
-                      fontWeight:
-                          isSelected ? FontWeight.w600 : FontWeight.normal,
-                      color: isSelected
-                          ? const Color(0xFF006EFF)
-                          : const Color(0xFF333333),
+                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                      color: isSelected ? const Color(0xFF006EFF) : const Color(0xFF333333),
                     ),
                   ),
                   trailing: Icon(
@@ -219,17 +211,13 @@ class _BillTemplatePageState extends State<BillTemplatePage> {
                           horizontal: 24,
                           vertical: 10,
                         ),
-                        color:
-                            isActive ? const Color(0xFFF6F7FB) : Colors.white,
+                        color: isActive ? const Color(0xFFF6F7FB) : Colors.white,
                         child: Text(
                           title,
                           style: TextStyle(
                             fontSize: 12,
-                            color: isActive
-                                ? const Color(0xFF006EFF)
-                                : const Color(0xFF666666),
-                            fontWeight:
-                                isActive ? FontWeight.w600 : FontWeight.normal,
+                            color: isActive ? const Color(0xFF006EFF) : const Color(0xFF666666),
+                            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
                           ),
                         ),
                       ),
@@ -281,29 +269,26 @@ class _BillTemplatePageState extends State<BillTemplatePage> {
 
 /// 分类分组
 class _CategoryGroup {
+  _CategoryGroup({required this.name, required this.items});
   final String name;
   final List<Map<String, dynamic>> items;
-
-  _CategoryGroup({required this.name, required this.items});
 }
 
 /// 模板卡片（独立 Widget，遵循 listLoad 规则）
 class _TemplateCard extends StatelessWidget {
-  final Map<String, dynamic> item;
-  final bool settingDefault;
-  final VoidCallback onSetDefault;
-
   const _TemplateCard({
     required this.item,
     required this.settingDefault,
     required this.onSetDefault,
   });
+  final Map<String, dynamic> item;
+  final bool settingDefault;
+  final VoidCallback onSetDefault;
 
   @override
   Widget build(BuildContext context) {
     final String name = item['template_name']?.toString() ?? '未命名模板';
-    final bool isDefault =
-        item['isdefault'] == true || item['isdefault'] == 1;
+    final bool isDefault = item['isdefault'] == true || item['isdefault'] == 1;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -329,8 +314,7 @@ class _TemplateCard extends StatelessWidget {
           ),
           if (isDefault)
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: const BoxDecoration(
                 color: Color(0xFF006EFF),
                 borderRadius: BorderRadius.only(
@@ -351,8 +335,7 @@ class _TemplateCard extends StatelessWidget {
             GestureDetector(
               onTap: settingDefault ? null : onSetDefault,
               child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   border: Border.all(color: const Color(0xFF006EFF)),
                   borderRadius: BorderRadius.circular(4),
@@ -363,8 +346,7 @@ class _TemplateCard extends StatelessWidget {
                         height: 14,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          valueColor:
-                              AlwaysStoppedAnimation<Color>(Color(0xFF006EFF)),
+                          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF006EFF)),
                         ),
                       )
                     : const Text(

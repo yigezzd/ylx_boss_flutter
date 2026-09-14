@@ -1458,13 +1458,17 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
             _items[ei].qtyController.text = MathUtils.formatDecimal(1, oq + aq);
             _recalcRow(_items[ei]);
           } else {
+            // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+            final rowCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+            final rowPrice = rowCgprice != 0
+                ? rowCgprice
+                : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
             final row = _DetailRow()
               ..nameController.text =
                   prod['productname']?.toString() ?? prod['name']?.toString() ?? ''
               ..qtyController.text =
                   MathUtils.formatDecimal(1, double.tryParse((prod['qty'] ?? 1).toString()) ?? 1)
-              ..priceController.text = MathUtils.formatDecimal(
-                  2, double.tryParse((prod['cgprice'] ?? prod['price'] ?? 0).toString()) ?? 0)
+              ..priceController.text = MathUtils.formatDecimal(2, rowPrice)
               ..prodid = prod['prodid']?.toString() ?? prod['productid']?.toString() ?? ''
               ..barcode = prod['barcode']?.toString() ?? prod['selfbarcode']?.toString() ?? ''
               ..rawData = Map<String, dynamic>.from(prod);
@@ -1565,17 +1569,23 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
           if (si?.type == 'weight') {
             qty = si!.qty ?? 1;
           } else if (si?.type == 'amount') {
-            final p =
-                double.tryParse(prod['cgprice']?.toString() ?? prod['price']?.toString() ?? '0') ??
-                    0;
+            // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+            final scaleCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+            final p = scaleCgprice != 0
+                ? scaleCgprice
+                : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
             if (p > 0) qty = (si!.amount ?? 0) / p;
           }
+          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+          final scanCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+          final scanPrice = scanCgprice != 0
+              ? scanCgprice
+              : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
           final row = _DetailRow()
             ..nameController.text =
                 prod['productname']?.toString() ?? prod['name']?.toString() ?? ''
             ..qtyController.text = MathUtils.formatDecimal(1, qty)
-            ..priceController.text = MathUtils.formatDecimal(
-                2, double.tryParse((prod['cgprice'] ?? prod['price'] ?? 0).toString()) ?? 0)
+            ..priceController.text = MathUtils.formatDecimal(2, scanPrice)
             ..prodid = prodid
             ..barcode = barcode
             ..rawData = Map<String, dynamic>.from(prod);

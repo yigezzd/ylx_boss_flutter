@@ -85,23 +85,35 @@ class _WmsStockQueryPageState extends State<WmsStockQueryPage> with SingleTicker
           (res is Map<String, dynamic> ? res['wmscounterid'] : null)?.toString() ?? '';
       if (wmscounterid.isEmpty) return;
       _selectedCounterId = wmscounterid;
-      // 获取仓库名称
+      // 获取仓库名称（与选择弹窗一致：排除零售仓 countertype=0，对齐 Vue countertype: "1,2,3,4"）
       final counterResult = await request(HttpApi.counterGetList, {
         'sids': [_storeId],
         'nosidsflag': 1,
         'stopflag': 0,
+        'countertype': '1,2,3,4',
       });
       if (!mounted) return;
+      // 用户已手动改选时，不再应用默认仓库解析结果，避免异步覆盖（对齐 Vue）
+      if (_selectedCounterId != wmscounterid) return;
       final counterData = counterResult['data'];
       final list =
           (counterData is Map<String, dynamic> ? counterData['list'] : null) as List? ?? [];
+      String? foundName;
       for (final c in list.whereType<Map<String, dynamic>>()) {
         if (c['counterid']?.toString() == wmscounterid) {
-          _selectedCounterName = c['countername']?.toString() ?? '';
+          foundName = c['countername']?.toString() ?? '';
           break;
         }
       }
-      setState(() {});
+      // 对齐 Vue：默认仓库为零售仓（已不可选）时清空，避免已选值不在可选项内
+      setState(() {
+        if (foundName != null) {
+          _selectedCounterName = foundName;
+        } else {
+          _selectedCounterId = '';
+          _selectedCounterName = '';
+        }
+      });
     } catch (_) {}
   }
 
@@ -127,6 +139,7 @@ class _WmsStockQueryPageState extends State<WmsStockQueryPage> with SingleTicker
         'sids': [_storeId],
         'nosidsflag': 1,
         'stopflag': 0,
+        'countertype': '1,2,3,4',
         'cond': searchText,
         'is_page': 1,
         'page': page,

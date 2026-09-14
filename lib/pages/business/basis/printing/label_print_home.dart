@@ -11,6 +11,7 @@ import 'package:flutter_deer/pages/business/basis/printing/router.dart';
 import 'package:flutter_deer/pages/user/label_print_page.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/routers/fluro_navigator.dart';
+import 'package:flutter_deer/util/barcode_utils.dart';
 import 'package:flutter_deer/util/gprinter.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
@@ -118,19 +119,26 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
 
   // ─── 搜索 / 扫码 ───
 
-  /// 搜索商品：输入框搜索走 cond 模糊匹配（条码/品名/自编码）；
-  /// 扫码调用（带 barcode 参数）按 scancode 精确查询（对齐 productGetList 扫码语义）
+  /// 搜索商品（对齐 Vue searchFn / scanFn）：
+  /// - 扫码（带 [barcode] 参数）：解析条码秤 → scancode 精确查询，结果追加/累加到现有列表
+  /// - 输入框回车（PDA 扫码枪录入亦经此路径）：barcode 模糊匹配（条码/品名/自编码），
+  ///   单条结果追加/累加，多条打开商品选择页
   Future<void> _searchProduct([String? barcode]) async {
     final cond = barcode ?? _searchController.text.trim();
     if (cond.isEmpty) return;
     _searchController.clear();
 
+    final isScan = barcode != null;
+    // 尝试解析条码秤生成的重量码/金额码（对齐 Vue scanFn）
+    final scaleInfo = parseScaleBarcode(cond);
+    final searchCode = scaleInfo?.productCode ?? cond;
+
     try {
-      final isScan = barcode != null;
       final res = await request(
           HttpApi.productGetList,
           {
-            if (isScan) 'scancode': cond else 'barcode': cond,
+            // 秤码/扫码按商品码精确查询，输入框按 barcode 模糊匹配
+            if (isScan || scaleInfo != null) 'scancode': searchCode else 'barcode': cond,
             'is_page': 1,
             'page': 1,
             'pagesize': 10,
@@ -143,33 +151,87 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
               .toList() ??
           [];
 
-      if (list.length == 1) {
-        final item = Map<String, dynamic>.from(list[0]);
-        item['qty'] = _clampQty(item['qty']);
-        // 多单位/多规格商品打开商品详情弹窗选择单位/规格（对齐 Vue searchFn）
-        if (item['specflag']?.toString() == '1' || item['packageflag']?.toString() == '1') {
-          _showProductDetailSheet(item);
-        } else {
-          setState(() => _dataList = [item]);
-        }
-      } else if (list.length > 1) {
-        _openSelectProduct(cond);
+      if (list.isEmpty) {
+        Toast.show(isScan ? '未查询到该商品' : '未查询到商品');
+        return;
+      }
+      if (list.length == 1 || isScan) {
+        // 对齐 Vue scanFn：扫码直接取第一条处理；输入框单条结果同样追加/累加
+        _handleScannedItem(list[0], scaleInfo);
       } else {
-        Toast.show('未查询到商品');
+        // 输入框多条命中：打开商品选择页（对齐 Vue searchFn）
+        _openSelectProduct(cond);
       }
     } catch (_) {}
   }
 
-  /// 扫码搜索
+  /// 单商品结果处理（对齐 Vue scanFn）：
+  /// 条码秤数量赋值 → 多规格商品弹窗选规格 → 其余商品直接追加/累加到列表
+  void _handleScannedItem(Map<String, dynamic> rawItem, ScaleBarcodeResult? scaleInfo) {
+    final item = Map<String, dynamic>.from(rawItem);
+
+    // 条码秤解析的数量赋值（对齐 Vue scanFn）：重量码取重量，金额码按售价/进价反算
+    double initQty = 1;
+    if (scaleInfo?.type == 'weight') {
+      initQty = scaleInfo?.qty ?? 1;
+    } else if (scaleInfo?.type == 'amount') {
+      // JS 真值语义：sellprice || inprice || 0
+      final sp = item['sellprice']?.toString() ?? '';
+      final priceSrc = (sp.isNotEmpty && sp != '0') ? item['sellprice'] : item['inprice'];
+      final price = double.tryParse(priceSrc?.toString() ?? '') ?? 0;
+      initQty = price > 0 ? (scaleInfo?.amount ?? 0) / price : 1;
+    }
+    // 打印份数为整数 1~20，与步进器/批量修改上限保持一致
+    if (!initQty.isFinite || initQty <= 0) initQty = 1;
+    item['qty'] = _clampQty(initQty.round());
+
+    // 多单位/多规格商品打开商品详情弹窗选择单位/规格，确认后累加（对齐 Vue 扫码流程）
+    if (item['specflag']?.toString() == '1' || item['packageflag']?.toString() == '1') {
+      _showProductDetailSheet(item);
+    } else {
+      _addOrAccumulateItem(item);
+    }
+  }
+
+  /// 商品追加/累加（对齐 Vue addOrAccumulateItem）：
+  /// 列表中已存在（productid 匹配，barcode 兜底）则累加数量上限 20，否则新增
+  void _addOrAccumulateItem(Map<String, dynamic> item) {
+    item['qty'] = _clampQty(item['qty']);
+    final newQty = item['qty'] as int;
+    final productid = item['productid']?.toString() ?? '';
+    final barcode = item['barcode']?.toString() ?? '';
+
+    final existIdx = _dataList.indexWhere((d) {
+      final dProductid = d['productid']?.toString() ?? '';
+      final dBarcode = d['barcode']?.toString() ?? '';
+      // 优先以 productid 匹配，部分场景可能缺失则用 barcode 兜底
+      return (productid.isNotEmpty && dProductid == productid) ||
+          (barcode.isNotEmpty && dBarcode.isNotEmpty && dBarcode == barcode);
+    });
+
+    setState(() {
+      if (existIdx > -1) {
+        // 已存在：累加数量，上限 20
+        final oldQty = int.tryParse(_dataList[existIdx]['qty']?.toString() ?? '') ?? 1;
+        final total = oldQty + newQty;
+        _dataList[existIdx]['qty'] = total > 20 ? 20 : total;
+      } else {
+        // 不存在：新增到列表
+        _dataList.add(Map<String, dynamic>.from(item));
+      }
+    });
+  }
+
+  /// 扫码搜索（摄像头扫码 → 追加/累加，支持连续扫码）
   Future<void> _scanBarcode() async {
-    _searchProduct('98545415511');
-    return;
-    final result = await Navigator.push<String>(
+    final result = await Navigator.push<Object>(
       context,
       MaterialPageRoute(builder: (_) => const QrCodeScannerPage()),
     );
-    if (result != null && result.isNotEmpty) {
-      _searchProduct(result);
+    if (result == null || !mounted) return;
+    final code = result.toString();
+    if (code.isNotEmpty) {
+      _searchProduct(code);
     }
   }
 
@@ -238,22 +300,9 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
       ],
     );
     if (updated != null && mounted) {
-      _detailConfirm(updated);
+      // 确认后追加/累加（对齐 Vue detailConfirm + addOrAccumulateItem）
+      _addOrAccumulateItem(updated);
     }
-  }
-
-  /// 商品详情弹窗确定回调（对齐 Vue detailConfirm：qty 限制 1~20，同 productid 替换否则新增）
-  void _detailConfirm(Map<String, dynamic> item) {
-    item['qty'] = _clampQty(item['qty']);
-    final productid = item['productid']?.toString();
-    final existIdx = _dataList.indexWhere((d) => d['productid']?.toString() == productid);
-    setState(() {
-      if (existIdx > -1) {
-        _dataList[existIdx] = Map<String, dynamic>.from(item);
-      } else {
-        _dataList.add(Map<String, dynamic>.from(item));
-      }
-    });
   }
 
   /// 打开单据列表页，选择商品后加入打印列表
@@ -746,8 +795,8 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
                             GestureDetector(
                               behavior: HitTestBehavior.opaque,
                               onTap: () {
+                                // 仅清空输入框，保留已扫码商品列表（对齐小程序清空输入行为）
                                 _searchController.clear();
-                                setState(() => _dataList = []);
                               },
                               child: const Padding(
                                 padding: EdgeInsets.symmetric(horizontal: 6),

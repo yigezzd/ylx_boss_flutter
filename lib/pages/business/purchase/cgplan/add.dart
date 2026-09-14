@@ -986,13 +986,19 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: raw,
-        initialPrice: double.tryParse(row.priceController.text) ?? 0,
-        initialQty: double.tryParse(row.qtyController.text) ?? 0,
-        bsid: _storeid,
-        readOnly: _readOnly,
-        priceReadOnly: true,
+      builder: (ctx) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: raw,
+          initialPrice: double.tryParse(row.priceController.text) ?? 0,
+          initialQty: double.tryParse(row.qtyController.text) ?? 0,
+          bsid: _storeid,
+          readOnly: _readOnly,
+          priceReadOnly: true,
+        ),
       ),
     );
     if (result != null && mounted) {
@@ -1984,8 +1990,11 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
             final addQty = double.tryParse(prod['qty']?.toString() ?? '1') ?? 1;
             _items[existing].qtyController.text = MathUtils.formatDecimal(1, oldQty + addQty);
             // 同步选择页返回的新价格（用户可能修改了价格，否则统计栏仍按旧价计算）
-            final newPrice =
-                double.tryParse((prod['cgprice'] ?? prod['price'])?.toString() ?? '') ?? 0;
+            // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+            final syncCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+            final newPrice = syncCgprice != 0
+                ? syncCgprice
+                : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
             if (newPrice > 0) {
               _items[existing].priceController.text = MathUtils.formatDecimal(2, newPrice);
               if (_items[existing].rawData != null) {
@@ -1997,6 +2006,11 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
             _items[existing].amt =
                 MathUtils.formatDecimalNum(3, MathUtils.mul(oldQty + addQty, price));
           } else {
+            // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+            final rowCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+            final rowPrice = rowCgprice != 0
+                ? rowCgprice
+                : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
             final row = _DetailRow()
               ..nameController.text =
                   prod['productname']?.toString() ?? prod['name']?.toString() ?? ''
@@ -2005,8 +2019,7 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
                   (prod['qty'] ?? 1).toString().contains('.')
                       ? double.tryParse(prod['qty'].toString()) ?? 1
                       : double.parse(prod['qty']?.toString() ?? '1'))
-              ..priceController.text = MathUtils.formatDecimal(
-                  2, double.tryParse((prod['cgprice'] ?? prod['price'] ?? 0).toString()) ?? 0)
+              ..priceController.text = MathUtils.formatDecimal(2, rowPrice)
               ..prodid = prod['prodid']?.toString() ?? prod['productid']?.toString() ?? ''
               ..barcode = prod['barcode']?.toString() ?? prod['selfbarcode']?.toString() ?? ''
               ..rawData = Map<String, dynamic>.from(prod);
@@ -2128,21 +2141,27 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
           if (scaleInfo?.type == 'weight') {
             qty = scaleInfo!.qty ?? 1;
           } else if (scaleInfo?.type == 'amount') {
-            final price =
-                double.tryParse(prod['cgprice']?.toString() ?? prod['price']?.toString() ?? '0') ??
-                    0;
+            // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+            final scaleCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+            final price = scaleCgprice != 0
+                ? scaleCgprice
+                : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
             if (price > 0) {
               qty = (scaleInfo!.amount ?? 0) / price;
             }
           }
+          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+          final scanCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+          final scanPrice = scanCgprice != 0
+              ? scanCgprice
+              : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
           _items.insert(
               0,
               _DetailRow()
                 ..nameController.text =
                     prod['productname']?.toString() ?? prod['name']?.toString() ?? ''
                 ..qtyController.text = MathUtils.formatDecimal(1, qty)
-                ..priceController.text = MathUtils.formatDecimal(
-                    2, double.tryParse((prod['cgprice'] ?? prod['price'] ?? 0).toString()) ?? 0)
+                ..priceController.text = MathUtils.formatDecimal(2, scanPrice)
                 ..prodid = prodid
                 ..barcode = barcode
                 ..rawData = Map<String, dynamic>.from(prod));
@@ -2613,7 +2632,10 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
         ) ??
         0;
     final String saleprice = spVal.toStringAsFixed(2);
-    final String origPrice = data['cgprice']?.toString() ?? data['price']?.toString() ?? '0';
+    // 原进价（采购价优先，为空或为 0 时回退档案进价，对齐选择页取值规则）
+    final double origCgprice = double.tryParse(data['cgprice']?.toString() ?? '') ?? 0;
+    final String origPrice =
+        origCgprice != 0 ? data['cgprice'].toString() : (data['price']?.toString() ?? '0');
 
     final ro = widget.readOnly;
     return ConstrainedBox(

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_deer/components/select/select_supplier.dart';
@@ -12,6 +13,7 @@ import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
+import 'package:sp_util/sp_util.dart';
 
 class CommodityListPage extends StatefulWidget {
   const CommodityListPage({super.key});
@@ -40,6 +42,9 @@ class _CommodityListPageState extends State<CommodityListPage> {
   String _filterItemtype = ''; // 商品类型
   String _filterPricetype = ''; // 计价方式
   String _filterItemstatus = ''; // 商品状态（更多筛选中）
+
+  /// 进价查看权限（对齐小程序 index.vue user.inpriceflag）
+  int _inpriceflag = 1;
 
   // 筛选常量
   static const List<Map<String, String>> _itemTypes = [
@@ -72,12 +77,24 @@ class _CommodityListPageState extends State<CommodityListPage> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
+    _loadInpriceFlag();
     // 查看权限校验
     if (!PermissionUtils.checkPermission('010201', showTip: false)) {
       Toast.show('你无权查看商品档案，请在后台修改权限');
     } else {
       _loadData();
     }
+  }
+
+  /// 从用户信息读取进价查看权限（对齐小程序 index.vue：inpriceflag==1 展示进价，否则展示 ***）
+  void _loadInpriceFlag() {
+    try {
+      final userStr = SpUtil.getString(Constant.user) ?? '';
+      if (userStr.isNotEmpty) {
+        final u = jsonDecode(userStr) as Map<String, dynamic>;
+        _inpriceflag = int.tryParse(u['inpriceflag']?.toString() ?? '1') ?? 1;
+      }
+    } catch (_) {}
   }
 
   @override
@@ -769,6 +786,7 @@ class _CommodityListPageState extends State<CommodityListPage> {
                   return RepaintBoundary(
                     child: _CommodityCard(
                       item: _list[index],
+                      inpriceflag: _inpriceflag,
                       onTap: () async {
                         final refresh = await Navigator.push<bool>(
                           context,
@@ -791,8 +809,15 @@ class _CommodityListPageState extends State<CommodityListPage> {
 
 /// 商品列表卡片（对齐小程序 index.vue product-item 布局）
 class _CommodityCard extends StatelessWidget {
-  const _CommodityCard({required this.item, required this.onTap});
+  const _CommodityCard({
+    required this.item,
+    required this.inpriceflag,
+    required this.onTap,
+  });
   final Map<String, dynamic> item;
+
+  /// 进价查看权限：1 展示进价，否则展示 ***（对齐小程序 user.inpriceflag）
+  final int inpriceflag;
   final VoidCallback onTap;
 
   @override
@@ -907,7 +932,7 @@ class _CommodityCard extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          '进价：$inprice',
+                          inpriceflag == 1 ? '进价：$inprice' : '进价：***',
                           style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
                         ),
                       ],

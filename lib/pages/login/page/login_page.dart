@@ -138,6 +138,10 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => _isLoading = true);
     _getLoginList().then((stores) {
       if (stores.length > 1) {
+        // 需要用户选择门店：先结束按钮加载态，
+        // 避免弹窗展示期间及用户返回取消后登录按钮一直转圈；
+        // 用户选中门店后由 _doLogin 重新进入加载态
+        if (mounted) setState(() => _isLoading = false);
         _showStoreSelectionDialog(stores);
       } else if (stores.length == 1) {
         _doLogin(stores[0] as Map<String, dynamic>);
@@ -173,6 +177,9 @@ class _LoginPageState extends State<LoginPage> {
 
   /// 第二步：执行登录
   void _doLogin(Map<String, dynamic>? storeItem) {
+    // 从门店选择弹窗选中门店后重新进入加载态；
+    // 单门店/无门店直登时保持 _login 中已有的加载态
+    if (mounted) setState(() => _isLoading = true);
     final String pwdMd5 = md5.convert(utf8.encode(_passwordController.text)).toString();
     final Map<String, dynamic> params;
     if (_loginType == 0) {

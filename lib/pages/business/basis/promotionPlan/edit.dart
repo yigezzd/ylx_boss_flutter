@@ -1711,39 +1711,62 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
           child: Text(label, style: const TextStyle(fontSize: 13, color: Color(0xFF333333))),
         ),
         Expanded(
-          child: TextField(
-            controller: ctrl,
-            enabled: !_disabled,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            textAlign: TextAlign.right,
-            decoration: InputDecoration(
-              hintText: '请输入',
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(4),
-                borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(4),
-                borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(4),
-                borderSide: const BorderSide(color: Color(0xFF006EFF)),
-              ),
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            ),
-            style: const TextStyle(fontSize: 13),
-            onSubmitted: (v) {
-              final formatted = MathUtils.formatDecimal(scale, v);
-              setState(() => item[field] = formatted);
-              ctrl.text = formatted;
-            },
-            onTapOutside: (_) {
-              final v = ctrl.text;
-              final formatted = MathUtils.formatDecimal(scale, v);
-              setState(() => item[field] = formatted);
-              ctrl.text = formatted;
+          child: Builder(
+            builder: (inputCtx) {
+              return TextField(
+                controller: ctrl,
+                enabled: !_disabled,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                textAlign: TextAlign.right,
+                // 键盘弹出时预留滚动余量，确保输入框完整露出不被遮挡
+                scrollPadding: const EdgeInsets.only(bottom: 120),
+                onTap: () {
+                  // 键盘弹出会压缩视口，等键盘动画结束后再滚动到输入框，
+                  // 避免“点击时可见、键盘弹出后被遮挡”的时序问题
+                  Future.delayed(const Duration(milliseconds: 350), () {
+                    if (!inputCtx.mounted) return;
+                    try {
+                      Scrollable.ensureVisible(
+                        inputCtx,
+                        alignment: 0.6,
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOut,
+                      );
+                    } catch (_) {
+                      // 页面已关闭、widget 已从树中移除（deactivated）时忽略
+                    }
+                  });
+                },
+                decoration: InputDecoration(
+                  hintText: '请输入',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(4),
+                    borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(4),
+                    borderSide: const BorderSide(color: Color(0xFFDEDEDE)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(4),
+                    borderSide: const BorderSide(color: Color(0xFF006EFF)),
+                  ),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                ),
+                style: const TextStyle(fontSize: 13),
+                onSubmitted: (v) {
+                  final formatted = MathUtils.formatDecimal(scale, v);
+                  setState(() => item[field] = formatted);
+                  ctrl.text = formatted;
+                },
+                onTapOutside: (_) {
+                  final v = ctrl.text;
+                  final formatted = MathUtils.formatDecimal(scale, v);
+                  setState(() => item[field] = formatted);
+                  ctrl.text = formatted;
+                },
+              );
             },
           ),
         ),

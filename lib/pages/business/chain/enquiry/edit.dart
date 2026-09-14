@@ -44,6 +44,10 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
   String? _instorename;
   String? _outsid; // 配送中心
   String? _outstorename;
+  String? _outhandlerid; // 发货经手人
+  String? _outhandlername;
+  String? _inhandlerid; // 收货经手人
+  String? _inhandlername;
   DateTime? _validtime; // 有效日期
   final TextEditingController _validtimeController = TextEditingController();
   final TextEditingController _remarkController = TextEditingController();
@@ -285,6 +289,11 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
           _instorename = data['instorename']?.toString();
           _outsid = data['outsid']?.toString();
           _outstorename = data['outstorename']?.toString();
+          // 对齐 Vue form fields：发货/收货经手人
+          _outhandlerid = data['outhandlerid']?.toString();
+          _outhandlername = data['outhandlername']?.toString();
+          _inhandlerid = data['inhandlerid']?.toString();
+          _inhandlername = data['inhandlername']?.toString();
           _remarkController.text = data['remark']?.toString() ?? '';
           _urgentflag = data['urgentflag']?.toString() == '1';
           _refcode = data['refcode']?.toString() ?? '';
@@ -393,6 +402,11 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     params['instorename'] = _instorename ?? '';
     params['outsid'] = _outsid ?? '';
     params['outstorename'] = _outstorename ?? '';
+    // 对齐 Vue form fields：发货/收货经手人
+    params['outhandlerid'] = _outhandlerid ?? '';
+    params['outhandlername'] = _outhandlername ?? '';
+    params['inhandlerid'] = _inhandlerid ?? '';
+    params['inhandlername'] = _inhandlername ?? '';
     params['validtime'] =
         '${_validtime!.year}-${_validtime!.month.toString().padLeft(2, '0')}-${_validtime!.day.toString().padLeft(2, '0')}';
     params['remark'] = _remarkController.text.trim();
@@ -405,8 +419,14 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
 
     request(HttpApi.yhorderSave, params).then((result) {
       if (!mounted) return;
-      Toast.show(result['retmsg']?.toString() ?? '保存成功');
       final retData = result['data'];
+      // 保存后进入多级审批流程时，不提示保存成功和接口返回信息
+      final bool enterApproval = withSign &&
+          retData is Map<String, dynamic> &&
+          _parseReviewList(retData['reviewFlowUsers']).isNotEmpty;
+      if (!enterApproval) {
+        Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
         if (isNew) {
@@ -465,7 +485,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     setState(() => _submitAction = _EnqAction.sign);
     request(HttpApi.yhorderSign, params).then((result) {
       if (!mounted) return;
-      Toast.show('审核成功');
+      Toast.show(result['retmsg']?.toString() ?? '审核成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _EnqAction.none);
@@ -499,7 +519,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     final params = Map<String, dynamic>.from(_billData!);
     request(HttpApi.yhorderRetsign, params).then((result) {
       if (!mounted) return;
-      Toast.show('反审成功');
+      Toast.show(result['retmsg']?.toString() ?? '反审成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _EnqAction.none);
@@ -532,7 +552,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     params['signflag'] = 1;
     request(HttpApi.yhorderSign, params).then((result) {
       if (!mounted) return;
-      Toast.show('撤回成功');
+      Toast.show(result['retmsg']?.toString() ?? '撤回成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _EnqAction.none);
@@ -778,7 +798,15 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       Toast.show('请选择配送中心');
       return;
     }
-    final result = await Navigator.push<List<Map<String, dynamic>>>(
+    final result = await _openSelectProductPage();
+    if (result != null && mounted) {
+      _applySelectedProducts(result);
+    }
+  }
+
+  /// 打开选择商品页（扫码命中多条商品时以 initialKeyword 自动粘贴条码搜索）
+  Future<List<Map<String, dynamic>>?> _openSelectProductPage({String? keyword}) {
+    return Navigator.push<List<Map<String, dynamic>>>(
       context,
       MaterialPageRoute(
         builder: (_) => SelectProductPage(
@@ -798,33 +826,51 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
             'instockqty',
             'psamt',
           ],
+          // 带入扫描条码：选择页首次加载即按该条码搜索，展示全部命中商品供用户挑选
+          initialKeyword: keyword,
         ),
       ),
     );
-    if (result != null && mounted) {
-      setState(() {
-        for (final row in _items) {
-          row.dispose();
-        }
-        _items.clear();
-        for (final prod in result) {
-          final c = Map<String, dynamic>.from(prod);
-          // 对齐 Vue：price = lspsprice
-          c['price'] =
-              MathUtils.formatDecimal(2, double.tryParse(c['lspsprice']?.toString() ?? '') ?? 0);
-          _applyWriteData(c);
-          final row = _DetailRow()
-            ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
-            ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
-            ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
-            ..qtyController.text = c['qty']?.toString() ?? '0'
-            ..priceController.text = c['price']?.toString() ?? '0'
-            ..rawData = c;
-          row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
-          row.amtController.text = c['amt']?.toString() ?? '';
-          _items.add(row);
-        }
-      });
+  }
+
+  /// 选择页确认后整体回填明细（对齐 Vue onSelectProduct：选择页已选区含当前明细）
+  void _applySelectedProducts(List<Map<String, dynamic>> result) {
+    setState(() {
+      for (final row in _items) {
+        row.dispose();
+      }
+      _items.clear();
+      for (final prod in result) {
+        final c = Map<String, dynamic>.from(prod);
+        // 对齐 Vue：price = lspsprice
+        c['price'] =
+            MathUtils.formatDecimal(2, double.tryParse(c['lspsprice']?.toString() ?? '') ?? 0);
+        _applyWriteData(c);
+        final row = _DetailRow()
+          ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
+          ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
+          ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
+          ..qtyController.text = c['qty']?.toString() ?? '0'
+          ..priceController.text = c['price']?.toString() ?? '0'
+          ..rawData = c;
+        row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
+        row.amtController.text = c['amt']?.toString() ?? '';
+        _items.add(row);
+      }
+    });
+  }
+
+  /// 扫描条码命中多条商品时进入选择商品页（避免误取第一条），
+  /// 用户挑选确认后焦点交还扫码输入框，便于 PDA 连续录入
+  Future<void> _pickFromMultiple(String code, {FocusNode? returnFocusNode}) async {
+    final result = await _openSelectProductPage(keyword: code);
+    if (!mounted) return;
+    if (result != null) {
+      _applySelectedProducts(result);
+    }
+    // 无论确认/取消，均将焦点交还扫码输入框，便于 PDA 连续录入
+    if (returnFocusNode != null && mounted) {
+      returnFocusNode.requestFocus();
     }
   }
 
@@ -867,6 +913,12 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
       if (list.isEmpty) {
         Toast.show('未查询到该商品');
+        return;
+      }
+      if (list.length > 1) {
+        // 同一(秤)条码命中多条商品时无法自动确定目标：
+        // 进入选择商品页并将条码粘贴到搜索框自动搜索，供用户挑选
+        _pickFromMultiple(searchCode, returnFocusNode: returnFocusNode);
         return;
       }
       final first = list.first as Map;
@@ -912,49 +964,6 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     });
   }
 
-  /// 更换商品弹窗（对齐 Vue prod-popover/prod-form-item 打开选择商品弹窗替换当前行，供详情弹窗调用）
-  Future<void> _selectProductForRow(int index) async {
-    if ((_insid ?? '').isEmpty) {
-      Toast.show('请选择要货门店');
-      return;
-    }
-    if ((_outsid ?? '').isEmpty) {
-      Toast.show('请选择配送中心');
-      return;
-    }
-    final result = await Navigator.push<List<Map<String, dynamic>>>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => SelectProductPage(
-          mergData: {
-            ..._buildProductMergData(),
-            'itemstatus': '1,2',
-          },
-          singleSelectMode: true,
-          initialKeyword: _items[index].barcode,
-        ),
-      ),
-    );
-    if (result == null || result.isEmpty || !mounted) return;
-    final prod = Map<String, dynamic>.from(result.first);
-    // 对齐 Vue prodHandle：price = lspsprice，替换后数量置 0
-    prod['price'] =
-        MathUtils.formatDecimal(2, double.tryParse(prod['lspsprice']?.toString() ?? '') ?? 0);
-    prod['qty'] = '0';
-    _applyWriteData(prod);
-    setState(() {
-      final row = _items[index];
-      row.prodid = prod['productid']?.toString() ?? prod['prodid']?.toString() ?? '';
-      row.barcode = prod['barcode']?.toString() ?? prod['selfbarcode']?.toString() ?? '';
-      row.nameController.text = prod['productname']?.toString() ?? prod['name']?.toString() ?? '';
-      row.qtyController.text = prod['qty']?.toString() ?? '0';
-      row.priceController.text = prod['price']?.toString() ?? '0';
-      row.amt = double.tryParse(prod['amt']?.toString() ?? '') ?? 0;
-      row.amtController.text = prod['amt']?.toString() ?? '';
-      row.rawData = prod;
-    });
-  }
-
   /// 点击商品行打开详情弹窗（对齐 Vue proDetails：编辑数量/配送价/备注、单位/规格选择）
   Future<void> _editRowDetail(int index) async {
     final row = _items[index];
@@ -970,26 +979,27 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: data,
-        initialQty: qty,
-        initialPrice: price,
-        initialAmt: currentAmt,
-        initialRemark: data['remark']?.toString() ?? '',
-        insid: _insid ?? '',
-        outsid: _outsid ?? '',
-        // 对齐 Vue proDetails.vue yhsq：lsPsApplyShowStockqtyFlag == 1 显示配送中心库存
-        showPsStockqty: _lsPsApplyShowStockqtyFlag == 1,
-        // 对齐 PC ylx edit.vue L314/L335：lsPsWeightIntFlag == 1 时生鲜商品数量仅可输入整数
-        qtyIntOnly: _lsPsWeightIntFlag == 1,
+      builder: (_) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免数量输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: data,
+          initialQty: qty,
+          initialPrice: price,
+          initialAmt: currentAmt,
+          initialRemark: data['remark']?.toString() ?? '',
+          insid: _insid ?? '',
+          outsid: _outsid ?? '',
+          // 对齐 Vue proDetails.vue yhsq：lsPsApplyShowStockqtyFlag == 1 显示配送中心库存
+          showPsStockqty: _lsPsApplyShowStockqtyFlag == 1,
+          // 对齐 PC ylx edit.vue L314/L335：lsPsWeightIntFlag == 1 时生鲜商品数量仅可输入整数
+          qtyIntOnly: _lsPsWeightIntFlag == 1,
+        ),
       ),
     );
     if (result == null || !mounted) return;
-    // 更换商品（对齐 Vue prod-form-item 打开选择商品弹窗替换当前行）
-    if (result['_replace'] == true) {
-      _selectProductForRow(index);
-      return;
-    }
     final newQty =
         MathUtils.formatDecimalNum(1, double.tryParse(result['qty']?.toString() ?? '') ?? 0);
     final newPrice =
@@ -1262,6 +1272,65 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     }
   }
 
+  // =================== 经手人选择（对齐 Vue handler-form-item） ===================
+  /// 选择发货经手人（对齐 Vue mergeData: { sids: form.outsid }）
+  Future<void> _selectOutHandler() async {
+    if ((_outsid ?? '').isEmpty) {
+      Toast.show('请先选择配送中心');
+      return;
+    }
+    final result = await CommonSelectSheet.show(
+      context,
+      title: '选择发货经手人',
+      searchHint: '输入经手人名称/编码',
+      initialSelectedId: _outhandlerid,
+      idField: 'userid',
+      fetchData: (searchText, page) => request(HttpApi.sysUserList, {
+        'cond': searchText,
+        'sids': [_outsid],
+      }).then((result) {
+        final data = result['data'];
+        return data is Map<String, dynamic> ? data : null;
+      }),
+      mapResult: (item) => item,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _outhandlerid = result['userid']?.toString() ?? '';
+        _outhandlername = result['name']?.toString() ?? '';
+      });
+    }
+  }
+
+  /// 选择收货经手人（对齐 Vue mergeData: { sids: form.insid }）
+  Future<void> _selectInHandler() async {
+    if ((_insid ?? '').isEmpty) {
+      Toast.show('请先选择要货门店');
+      return;
+    }
+    final result = await CommonSelectSheet.show(
+      context,
+      title: '选择收货经手人',
+      searchHint: '输入经手人名称/编码',
+      initialSelectedId: _inhandlerid,
+      idField: 'userid',
+      fetchData: (searchText, page) => request(HttpApi.sysUserList, {
+        'cond': searchText,
+        'sids': [_insid],
+      }).then((result) {
+        final data = result['data'];
+        return data is Map<String, dynamic> ? data : null;
+      }),
+      mapResult: (item) => item,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _inhandlerid = result['userid']?.toString() ?? '';
+        _inhandlername = result['name']?.toString() ?? '';
+      });
+    }
+  }
+
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
@@ -1323,11 +1392,9 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
                   ),
                 ),
               ),
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
-                  child: _buildStickyHeader(),
-                ),
+              // 粘性表头：扫描框 + 商品明细标题栏（固定不随商品列表滚动）
+              PinnedHeaderSliver(
+                child: _buildStickyHeader(),
               ),
               if (_items.isNotEmpty)
                 SliverList.builder(
@@ -1373,10 +1440,10 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
 
   /// 商品明细头部（附件/删除/扫描/新增 + 标题，对齐 Vue 商品明细 tm-sheet）
   Widget _buildStickyHeader() {
-    return Align(
-      alignment: Alignment.topCenter,
-      child: ColoredBox(
-        color: const Color(0xFFF5F5F5),
+    return ColoredBox(
+      color: const Color(0xFFF5F5F5),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1663,16 +1730,23 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         _buildReadonlyField(label: '紧急补货', value: _urgentflag ? '是' : '否'),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
+        _buildReadonlyField(label: '发货经手人', value: _outhandlername ?? ''),
+        const Divider(height: 1, color: Color(0xFFF3F4F6)),
+        _buildReadonlyField(label: '收货经手人', value: _inhandlername ?? ''),
+        const Divider(height: 1, color: Color(0xFFF3F4F6)),
         _buildReadonlyField(label: '备注', value: _remarkController.text),
       ],
     );
   }
 
   Widget _buildBillInfoEditable() {
+    // 左侧标签文字宽度在原 80 基础上增加 1/3（80*4/3≈107），避免"配送中心仓库"等长标签折行
+    const double labelWidth = 107;
     return Column(
       children: [
         SelectFieldItem(
           label: '要货门店',
+          labelWidth: labelWidth,
           required: true,
           value: _instorename ?? '',
           onTap: _selectInStore,
@@ -1680,6 +1754,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
           label: '配送中心',
+          labelWidth: labelWidth,
           required: true,
           value: _outstorename ?? '',
           onTap: _selectOutStore,
@@ -1687,6 +1762,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
           label: '有效日期',
+          labelWidth: labelWidth,
           value: _validtimeController.text,
           onTap: () async {
             final now = DateTime.now();
@@ -1709,6 +1785,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
           label: '要货模板',
+          labelWidth: labelWidth,
           value: _refname,
           onTap: _selectTemplate,
         ),
@@ -1749,6 +1826,22 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
               ],
             ),
           ),
+        ),
+        const Divider(height: 1, color: Color(0xFFF3F4F6)),
+        // 对齐 Vue handler-form-item：发货经手人（依赖配送中心，未选时点击提示）
+        SelectFieldItem(
+          label: '发货经手人',
+          labelWidth: labelWidth,
+          value: _outhandlername ?? '',
+          onTap: _selectOutHandler,
+        ),
+        const Divider(height: 1, color: Color(0xFFF3F4F6)),
+        // 对齐 Vue handler-form-item：收货经手人（依赖要货门店，未选时点击提示）
+        SelectFieldItem(
+          label: '收货经手人',
+          labelWidth: labelWidth,
+          value: _inhandlername ?? '',
+          onTap: _selectInHandler,
         ),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         _buildField(
@@ -2169,7 +2262,8 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+            width: 107,
             child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
           ),
           Expanded(
@@ -2194,7 +2288,8 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+            width: 107,
             child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF374151))),
           ),
           Expanded(
@@ -2464,7 +2559,10 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           // 审批意见
           Row(
             children: [
-              const Text('*审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              const Text.rich(TextSpan(children: [
+                TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+                TextSpan(text: '审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              ])),
               const SizedBox(width: 16),
               GestureDetector(
                 onTap: () => setState(() => _flag = 1),
@@ -2487,10 +2585,13 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           ),
           const SizedBox(height: 20),
           // 备注/驳回原因
-          Text(
-            _flag == 1 ? '备注信息：' : '*驳回原因：',
-            style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-          ),
+          if (_flag == 1)
+            const Text('备注信息：', style: TextStyle(fontSize: 14, color: Color(0xFF333333)))
+          else
+            const Text.rich(TextSpan(children: [
+              TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+              TextSpan(text: '驳回原因：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+            ])),
           const SizedBox(height: 8),
           Stack(children: [
             TextField(
@@ -2587,77 +2688,121 @@ class _ApprovalLogSheet extends StatelessWidget {
   final List<Map<String, dynamic>> reviewBillFlows;
   final ScrollController scrollController;
 
+  String _formatAction(dynamic v) {
+    if (v == 1 || v?.toString() == '1') return '【通过】';
+    if (v == 0 || v?.toString() == '0') return '【驳回】';
+    if (v == 2 || v?.toString() == '2') return '【撤回】';
+    return '';
+  }
+
+  Color _actionColor(dynamic v) {
+    if (v == 1 || v?.toString() == '1') return const Color(0xFF00A870);
+    if (v == 0 || v?.toString() == '0') return const Color(0xFFEF4444);
+    if (v == 2 || v?.toString() == '2') return const Color(0xFFFF9900);
+    return const Color(0xFF6B7280);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          child: const Text('审批日志',
-              style:
-                  TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Color(0xFF111827))),
+        // 头部
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          child: Row(
+            children: [
+              // 左侧对称占位（与右侧关闭热区等宽），保证标题居中
+              const Spacer(),
+              const Text('审批日志', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              // 关闭热区：宽度为头部 1/3 以上，图标仍贴右，便于大触点关闭
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => Navigator.pop(context),
+                  child: Container(
+                    height: 44,
+                    alignment: Alignment.centerRight,
+                    child: const Icon(Icons.close, size: 20, color: Color(0xFF999999)),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
         const Divider(height: 1, color: Color(0xFFE5E7EB)),
+        // 表格
         Expanded(
           child: reviewBillFlows.isEmpty
               ? const Center(
-                  child: Text('暂无审批记录', style: TextStyle(fontSize: 14, color: Color(0xFF9CA3AF))))
+                  child: Text('暂无审批记录', style: TextStyle(fontSize: 13, color: Color(0xFF999999))))
               : ListView.builder(
                   controller: scrollController,
-                  padding: const EdgeInsets.all(16),
                   itemCount: reviewBillFlows.length,
-                  itemBuilder: (context, index) {
-                    final item = reviewBillFlows[index];
-                    final stepname = item['stepname']?.toString() ?? '';
-                    final username = item['username']?.toString() ?? '';
-                    final signtime = item['signtime']?.toString() ?? '';
-                    final signflag = item['signflag']?.toString() ?? '';
-                    final remark = item['remark']?.toString() ?? '';
-
-                    String statusLabel = '';
-                    Color statusColor = const Color(0xFF9CA3AF);
-                    if (signflag == '1') {
-                      statusLabel = '通过';
-                      statusColor = const Color(0xFF00A870);
-                    } else if (signflag == '0') {
-                      statusLabel = '驳回';
-                      statusColor = const Color(0xFFFF4D4F);
-                    } else if (signflag == '2') {
-                      statusLabel = '撤回';
-                      statusColor = const Color(0xFFFF9900);
-                    }
-
+                  itemBuilder: (ctx, i) {
+                    final item = reviewBillFlows[i];
                     return Container(
-                      margin: const EdgeInsets.only(bottom: 12),
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF9FAFB),
-                        borderRadius: BorderRadius.circular(8),
+                        color: i.isEven ? Colors.white : const Color(0xFFFAFAFA),
+                        border: const Border(bottom: BorderSide(color: Color(0xFFF0F0F0))),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              Expanded(
-                                child: Text('【$stepname】$username',
-                                    style: const TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w500,
-                                        color: Color(0xFF333333))),
+                              Container(
+                                width: 24,
+                                height: 24,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF5F5F5),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Center(
+                                  child: Text('${i + 1}',
+                                      style:
+                                          const TextStyle(fontSize: 11, color: Color(0xFF666666))),
+                                ),
                               ),
-                              Text(statusLabel, style: TextStyle(fontSize: 12, color: statusColor)),
+                              const SizedBox(width: 10),
+                              Text(
+                                item['username']?.toString() ?? '',
+                                style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Color(0xFF333333)),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                _formatAction(item['reviewsignflag']),
+                                style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                    color: _actionColor(item['reviewsignflag'])),
+                              ),
                             ],
                           ),
-                          if (signtime.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '节点：${item['stepname']?.toString() ?? ''}',
+                                  style: const TextStyle(fontSize: 12, color: Color(0xFF999999)),
+                                ),
+                              ),
+                              Text(
+                                item['signtime']?.toString() ??
+                                    item['createtime']?.toString() ??
+                                    '',
+                                style: const TextStyle(fontSize: 12, color: Color(0xFF999999)),
+                              ),
+                            ],
+                          ),
+                          if ((item['reviewremark']?.toString() ?? '').isNotEmpty) ...[
                             const SizedBox(height: 4),
-                            Text(signtime,
-                                style: const TextStyle(fontSize: 12, color: Color(0xFF9CA3AF))),
-                          ],
-                          if (remark.isNotEmpty) ...[
-                            const SizedBox(height: 4),
-                            Text('备注：$remark',
-                                style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                            Text('备注：${item['reviewremark']}',
+                                style: const TextStyle(fontSize: 12, color: Color(0xFF666666)))
                           ],
                         ],
                       ),
@@ -2876,17 +3021,6 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                 decoration: const BoxDecoration(
                     color: Colors.white, border: Border(top: BorderSide(color: Color(0xFFE5E7EB)))),
                 child: Row(children: [
-                  // 更换商品（对齐 Vue prod-form-item 打开选择商品弹窗）
-                  GestureDetector(
-                      onTap: () => Navigator.pop(context, {'_replace': true}),
-                      behavior: HitTestBehavior.opaque,
-                      child: const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 8, vertical: 13),
-                          child: Text('更换商品',
-                              style: TextStyle(
-                                  fontSize: 14,
-                                  color: Color(0xFF006EFF),
-                                  fontWeight: FontWeight.w500)))),
                   const SizedBox(width: 8),
                   Expanded(
                       child: OutlinedButton(

@@ -408,8 +408,14 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
 
     request(HttpApi.dborderSave, params).then((result) {
       if (!mounted) return;
-      Toast.show(result['retmsg']?.toString() ?? '保存成功');
       final retData = result['data'];
+      // 保存后进入多级审批流程时，不提示保存成功和接口返回信息
+      final bool enterApproval = withSign &&
+          retData is Map<String, dynamic> &&
+          _parseReviewList(retData['reviewFlowUsers']).isNotEmpty;
+      if (!enterApproval) {
+        Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
         if (isNew) {
@@ -473,7 +479,7 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
     setState(() => _submitAction = _AllotAction.sign);
     request(HttpApi.dborderSign, params).then((result) {
       if (!mounted) return;
-      Toast.show('审核成功');
+      Toast.show(result['retmsg']?.toString() ?? '审核成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _AllotAction.none);
@@ -509,7 +515,7 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
     final params = Map<String, dynamic>.from(_billData!);
     request(HttpApi.dborderRetsign, params).then((result) {
       if (!mounted) return;
-      Toast.show('反审成功');
+      Toast.show(result['retmsg']?.toString() ?? '反审成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _AllotAction.none);
@@ -543,7 +549,7 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
     params['signflag'] = 1;
     request(HttpApi.dborderSign, params).then((result) {
       if (!mounted) return;
-      Toast.show('撤回成功');
+      Toast.show(result['retmsg']?.toString() ?? '撤回成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _AllotAction.none);
@@ -808,7 +814,15 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
       Toast.show('请选择调出机构');
       return;
     }
-    final result = await Navigator.push<List<Map<String, dynamic>>>(
+    final result = await _openSelectProductPage();
+    if (result != null && mounted) {
+      _applySelectedProducts(result);
+    }
+  }
+
+  /// 打开选择商品页（扫码命中多条商品时以 initialKeyword 自动粘贴条码搜索）
+  Future<List<Map<String, dynamic>>?> _openSelectProductPage({String? keyword}) {
+    return Navigator.push<List<Map<String, dynamic>>>(
       context,
       MaterialPageRoute(
         builder: (_) => SelectProductPage(
@@ -834,32 +848,49 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
             'instockqty',
             'sellamt'
           ],
+          // 带入扫描条码：选择页首次加载即按该条码搜索，展示全部命中商品供用户挑选
+          initialKeyword: keyword,
         ),
       ),
     );
-    if (result != null && mounted) {
-      // 对齐 Vue onSelectProduct：整体替换明细
-      setState(() {
-        for (final row in _items) {
-          row.dispose();
-        }
-        _items.clear();
-        for (final prod in result) {
-          final c = Map<String, dynamic>.from(prod);
-          _applyWriteData(c);
-          _applyDefValSet(c);
-          final row = _DetailRow()
-            ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
-            ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
-            ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
-            ..qtyController.text = c['qty']?.toString() ?? '0'
-            ..priceController.text = c['lspsprice']?.toString() ?? c['price']?.toString() ?? '0'
-            ..rawData = c;
-          row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
-          row.amtController.text = c['amt']?.toString() ?? '';
-          _items.add(row);
-        }
-      });
+  }
+
+  /// 选择页确认后整体回填明细（对齐 Vue onSelectProduct：选择页已选区含当前明细）
+  void _applySelectedProducts(List<Map<String, dynamic>> result) {
+    setState(() {
+      for (final row in _items) {
+        row.dispose();
+      }
+      _items.clear();
+      for (final prod in result) {
+        final c = Map<String, dynamic>.from(prod);
+        _applyWriteData(c);
+        _applyDefValSet(c);
+        final row = _DetailRow()
+          ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
+          ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
+          ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
+          ..qtyController.text = c['qty']?.toString() ?? '0'
+          ..priceController.text = c['lspsprice']?.toString() ?? c['price']?.toString() ?? '0'
+          ..rawData = c;
+        row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
+        row.amtController.text = c['amt']?.toString() ?? '';
+        _items.add(row);
+      }
+    });
+  }
+
+  /// 扫描条码命中多条商品时进入选择商品页（避免误取第一条），
+  /// 用户挑选确认后焦点交还扫码输入框，便于 PDA 连续录入
+  Future<void> _pickFromMultiple(String code, {FocusNode? returnFocusNode}) async {
+    final result = await _openSelectProductPage(keyword: code);
+    if (!mounted) return;
+    if (result != null) {
+      _applySelectedProducts(result);
+    }
+    // 无论确认/取消，均将焦点交还扫码输入框，便于 PDA 连续录入
+    if (returnFocusNode != null && mounted) {
+      returnFocusNode.requestFocus();
     }
   }
 
@@ -902,6 +933,12 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
       final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
       if (list.isEmpty) {
         Toast.show('未查询到该商品');
+        return;
+      }
+      if (list.length > 1) {
+        // 同一(秤)条码命中多条商品时无法自动确定目标：
+        // 进入选择商品页并将条码粘贴到搜索框自动搜索，供用户挑选
+        _pickFromMultiple(searchCode, returnFocusNode: returnFocusNode);
         return;
       }
       final prod = list.first as Map<String, dynamic>;
@@ -1121,6 +1158,15 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
     });
   }
 
+  /// 单行删除
+  void _deleteItem(int index) {
+    setState(() {
+      _items[index].dispose();
+      _items.removeAt(index);
+      _selectedIndices.remove(index);
+    });
+  }
+
   // =================== 审批相关 ===================
   /// 解析审批列表数据
   static List<Map<String, dynamic>> _parseReviewList(dynamic data) {
@@ -1199,6 +1245,12 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
     );
   }
 
+  /// 粘性表头高度常量（已迁移至 PinnedHeaderSliver，自动适配内容高度）
+  // static const double _stickyScanHeight = 68.0;
+  // static const double _stickyTitleHeight = 48.0;
+  // static const double _stickyMinExtent = _stickyTitleHeight;
+  // static const double _stickyMaxExtent = _stickyScanHeight + _stickyMinExtent;
+
   Widget _buildBody() {
     // 键盘弹起时隐藏底部栏，给商品明细列表留出更多空间
     final keyboardVisible = MediaQuery.of(context).viewInsets.bottom > 0;
@@ -1232,11 +1284,11 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
                   ),
                 ),
               ),
-              if (!_isSigned && !_scanSettings.showInfraredInput)
-                const SliverToBoxAdapter(child: SizedBox(height: 8)),
-              SliverToBoxAdapter(
+              // 粘性表头：扫描框 + 商品明细标题栏（固定不随商品列表滚动）
+              PinnedHeaderSliver(
                 child: _buildStickyHeader(),
               ),
+              // 商品明细列表
               if (_items.isNotEmpty)
                 SliverList.builder(
                   itemCount: _items.length,
@@ -1250,6 +1302,7 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
                         isSelected: _selectedIndices.contains(index),
                         readOnly: _readOnly,
                         onToggle: () => _toggleIndex(index),
+                        onDelete: () => _deleteItem(index),
                         bsid: _outsid ?? '',
                         insid: _insid ?? '',
                         outsid: _outsid ?? '',
@@ -1284,118 +1337,98 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
   }
 
   Widget _buildStickyHeader() {
-    return Align(
-      alignment: Alignment.topCenter,
-      child: ColoredBox(
-        color: const Color(0xFFF5F5F5),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!_isSigned && _scanSettings.showInfraredInput) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-                child: _buildScanInput(),
-              ),
-              const SizedBox(height: 8),
-            ],
+    return ColoredBox(
+      color: const Color(0xFFF5F5F5),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_showScanInput) ...[
             Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 3,
-                            height: 14,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF006EFF),
-                              borderRadius: BorderRadius.circular(2),
-                            ),
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+              child: _buildScanInput(),
+            ),
+            const SizedBox(height: 8),
+          ],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 3,
+                          height: 14,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF006EFF),
+                            borderRadius: BorderRadius.circular(2),
                           ),
-                          const SizedBox(width: 8),
-                          const Expanded(
-                            child: Text('商品明细',
-                                style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFF111827))),
+                        ),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text('商品明细',
+                              style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF111827))),
+                        ),
+                        // 附件（对齐 Vue openAttach）
+                        GestureDetector(
+                          onTap: _openAttach,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.attach_file, size: 15, color: Color(0xFF6B7280)),
+                              const SizedBox(width: 2),
+                              Text('附件(${_fileLists.length})',
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF6B7280),
+                                      fontWeight: FontWeight.w500)),
+                            ],
                           ),
-                          // 附件（对齐 Vue openAttach）
+                        ),
+                        if (!_readOnly) ...[
+                          const SizedBox(width: 10),
                           GestureDetector(
-                            onTap: _openAttach,
+                            onTap: _toggleSelectMode,
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.attach_file, size: 15, color: Color(0xFF6B7280)),
+                                Icon(_isSelectMode ? Icons.close : Icons.delete_outline,
+                                    size: 17,
+                                    color: _isSelectMode
+                                        ? const Color(0xFF6B7280)
+                                        : const Color(0xFFFF4D4F)),
                                 const SizedBox(width: 2),
-                                Text('附件(${_fileLists.length})',
-                                    style: const TextStyle(
+                                Text(_isSelectMode ? '取消' : '删除',
+                                    style: TextStyle(
                                         fontSize: 12,
-                                        color: Color(0xFF6B7280),
+                                        color: _isSelectMode
+                                            ? const Color(0xFF6B7280)
+                                            : const Color(0xFFFF4D4F),
                                         fontWeight: FontWeight.w500)),
                               ],
                             ),
                           ),
-                          if (!_readOnly) ...[
-                            const SizedBox(width: 10),
+                          const SizedBox(width: 10),
+                          if (_scanSettings.showCameraButton) ...[
                             GestureDetector(
-                              onTap: _toggleSelectMode,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(_isSelectMode ? Icons.close : Icons.delete_outline,
-                                      size: 17,
-                                      color: _isSelectMode
-                                          ? const Color(0xFF6B7280)
-                                          : const Color(0xFFFF4D4F)),
-                                  const SizedBox(width: 2),
-                                  Text(_isSelectMode ? '取消' : '删除',
-                                      style: TextStyle(
-                                          fontSize: 12,
-                                          color: _isSelectMode
-                                              ? const Color(0xFF6B7280)
-                                              : const Color(0xFFFF4D4F),
-                                          fontWeight: FontWeight.w500)),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            if (_scanSettings.showCameraButton) ...[
-                              GestureDetector(
-                                onTap: _scanBarcode,
-                                child: const Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    BossSvgIcon(svgFile: 'scan.svg', size: 12),
-                                    SizedBox(width: 2),
-                                    Text('扫描',
-                                        style: TextStyle(
-                                            fontSize: 12,
-                                            color: Color(0xFF006EFF),
-                                            fontWeight: FontWeight.w500)),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                            ],
-                            GestureDetector(
-                              onTap: _selectProducts,
+                              onTap: _scanBarcode,
                               child: const Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(Icons.add_circle_outline,
-                                      size: 16, color: Color(0xFF006EFF)),
+                                  BossSvgIcon(svgFile: 'scan.svg', size: 12),
                                   SizedBox(width: 2),
-                                  Text('新增',
+                                  Text('扫描',
                                       style: TextStyle(
                                           fontSize: 12,
                                           color: Color(0xFF006EFF),
@@ -1403,20 +1436,39 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
                                 ],
                               ),
                             ),
+                            const SizedBox(width: 10),
                           ],
+                          GestureDetector(
+                            onTap: _selectProducts,
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.add_circle_outline, size: 16, color: Color(0xFF006EFF)),
+                                SizedBox(width: 2),
+                                Text('新增',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: Color(0xFF006EFF),
+                                        fontWeight: FontWeight.w500)),
+                              ],
+                            ),
+                          ),
                         ],
-                      ),
+                      ],
                     ),
-                    const Divider(height: 1, color: Color(0xFFE5E7EB)),
-                  ],
-                ),
+                  ),
+                  const Divider(height: 1, color: Color(0xFFE5E7EB)),
+                ],
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
+
+  /// 粘性表头委托（对齐采购订货 _CgorderStickyDelegate）
+  bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
 
   Widget _buildBillStatusWidget() {
     final data = _billData ?? {};
@@ -1576,10 +1628,13 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
   }
 
   Widget _buildBillInfoEditable() {
+    // 左侧标签文字宽度在原 80 基础上增加 1/3（80*4/3≈107），避免长标签折行
+    const double labelWidth = 107;
     return Column(
       children: [
         SelectFieldItem(
           label: '调入机构',
+          labelWidth: labelWidth,
           required: true,
           value: _instorename ?? '',
           onTap: _selectInStore,
@@ -1587,6 +1642,7 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
           label: '调入仓库',
+          labelWidth: labelWidth,
           required: true,
           value: _countername ?? '',
           onTap: _selectCounter,
@@ -1595,6 +1651,7 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
         // 对齐 Vue isStoredisabled：调入机构为总店且未选调入仓库时禁用
         SelectFieldItem(
           label: '调出机构',
+          labelWidth: labelWidth,
           required: true,
           value: _outstorename ?? '',
           enabled: !_isStoredisabled,
@@ -1603,6 +1660,7 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
           label: '有效日期',
+          labelWidth: labelWidth,
           value: _validtimeController.text,
           onTap: () async {
             final now = DateTime.now();
@@ -1623,19 +1681,19 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
           },
         ),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
-        // 对齐 Vue handler-form-item：发货经手人（依赖调出机构）
+        // 对齐 Vue handler-form-item：发货经手人（依赖调出机构，未选时点击提示）
         SelectFieldItem(
           label: '发货经手人',
+          labelWidth: labelWidth,
           value: _outhandlername ?? '',
-          enabled: (_outsid ?? '').isNotEmpty,
           onTap: _selectOutHandler,
         ),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
-        // 对齐 Vue handler-form-item：收货经手人（依赖调入机构）
+        // 对齐 Vue handler-form-item：收货经手人（依赖调入机构，未选时点击提示）
         SelectFieldItem(
           label: '收货经手人',
+          labelWidth: labelWidth,
           value: _inhandlername ?? '',
-          enabled: (_insid ?? '').isNotEmpty,
           onTap: _selectInHandler,
         ),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
@@ -2105,7 +2163,8 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+            width: 107,
             child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
           ),
           Expanded(
@@ -2132,7 +2191,8 @@ class _AllotApplyEditPageState extends State<AllotApplyEditPage>
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+            width: 107,
             child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF374151))),
           ),
           Expanded(
@@ -2187,6 +2247,7 @@ class _DetailItem extends StatefulWidget {
     required this.readOnly,
     required this.onToggle,
     required this.bsid,
+    required this.onDelete,
     this.insid = '',
     this.outsid = '',
     this.counterid = '',
@@ -2199,6 +2260,7 @@ class _DetailItem extends StatefulWidget {
   final bool isSelected;
   final bool readOnly;
   final VoidCallback onToggle;
+  final VoidCallback onDelete;
 
   /// 调出机构（对齐 Vue proDetails size 请求参数 outsid）
   final String bsid;
@@ -2236,15 +2298,21 @@ class _DetailItemState extends State<_DetailItem> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: data,
-        initialQty: qty,
-        initialSellprice: sellprice,
-        initialRemark: data['remark']?.toString() ?? '',
-        bsid: widget.bsid,
-        counterid: widget.counterid,
-        insid: widget.insid,
-        outsid: widget.outsid,
+      builder: (_) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免数量输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: data,
+          initialQty: qty,
+          initialSellprice: sellprice,
+          initialRemark: data['remark']?.toString() ?? '',
+          bsid: widget.bsid,
+          counterid: widget.counterid,
+          insid: widget.insid,
+          outsid: widget.outsid,
+        ),
       ),
     ).then((result) {
       if (result == null) return;
@@ -2354,10 +2422,20 @@ class _DetailItemState extends State<_DetailItem> {
                       style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)))),
               // 金额
               Expanded(
-                  flex: 4,
+                  flex: 3,
                   child: Text('金额：$amtText',
                       style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                       textAlign: TextAlign.right)),
+              if (!widget.readOnly && !widget.isSelectMode)
+                GestureDetector(
+                  onTap: widget.onDelete,
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    alignment: Alignment.center,
+                    child: const Icon(Icons.close, size: 15, color: Color(0xFFAAAAAA)),
+                  ),
+                ),
             ]),
           ],
         ),
@@ -3093,7 +3171,10 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           // 审批意见
           Row(
             children: [
-              const Text('*审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              const Text.rich(TextSpan(children: [
+                TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+                TextSpan(text: '审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              ])),
               const SizedBox(width: 16),
               GestureDetector(
                 onTap: () => setState(() => _flag = 1),
@@ -3116,10 +3197,13 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           ),
           const SizedBox(height: 20),
           // 备注/驳回原因
-          Text(
-            _flag == 1 ? '备注信息：' : '*驳回原因：',
-            style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-          ),
+          if (_flag == 1)
+            const Text('备注信息：', style: TextStyle(fontSize: 14, color: Color(0xFF333333)))
+          else
+            const Text.rich(TextSpan(children: [
+              TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+              TextSpan(text: '驳回原因：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+            ])),
           const SizedBox(height: 8),
           Stack(children: [
             TextField(
@@ -3236,20 +3320,22 @@ class _ApprovalLogSheet extends StatelessWidget {
       children: [
         // 头部
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Expanded(
-                child: Center(
-                  child: Text('审批日志', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                ),
-              ),
-              GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: const Padding(
-                  padding: EdgeInsets.all(4),
-                  child: Icon(Icons.close, size: 20, color: Color(0xFF999999)),
+              // 左侧对称占位（与右侧关闭热区等宽），保证标题居中
+              const Spacer(),
+              const Text('审批日志', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              // 关闭热区：宽度为头部 1/3 以上，图标仍贴右，便于大触点关闭
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => Navigator.pop(context),
+                  child: Container(
+                    height: 44,
+                    alignment: Alignment.centerRight,
+                    child: const Icon(Icons.close, size: 20, color: Color(0xFF999999)),
+                  ),
                 ),
               ),
             ],

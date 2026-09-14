@@ -13,6 +13,7 @@ import 'package:flutter_deer/pages/business/basis/classify/list.dart';
 import 'package:flutter_deer/pages/business/basis/commodity/add_package.dart';
 import 'package:flutter_deer/pages/business/basis/commodity/bundle.dart';
 import 'package:flutter_deer/pages/business/basis/commodity/more_price.dart';
+import 'package:flutter_deer/pages/business/basis/commodity/prize.dart';
 import 'package:flutter_deer/pages/business/basis/commodity/product.dart';
 import 'package:flutter_deer/pages/business/basis/commodity/spec.dart';
 import 'package:flutter_deer/res/constant.dart';
@@ -38,6 +39,9 @@ const Map<String, dynamic> _formDefault = {
   'typecode': '',
   'size': '',
   'unit': '',
+  'defcgunit': '',
+  'defpfunit': '',
+  'defpsunit': '',
   'brandname': '',
   'remark': '',
   'itemtype': 1,
@@ -68,6 +72,7 @@ const Map<String, dynamic> _formDefault = {
   'promotionendtime': '',
   'intaxrate': '',
   'outtaxrate': '',
+  'custorderqtymin': '',
   'stockflag': 1,
   'initstorageflag': 0,
   'pointflag': 1,
@@ -91,6 +96,7 @@ const Map<String, dynamic> _formDefault = {
   'locationid': '',
   'packagenum': 1,
   'extendlist': <Map<String, dynamic>>[],
+  'prizelist': <Map<String, dynamic>>[],
 };
 
 class CommodityAddPage extends StatefulWidget {
@@ -209,6 +215,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     {'label': '自动拆分', 'value': 4},
     {'label': '自动组装', 'value': 5},
     {'label': '特价打包', 'value': 8},
+    {'label': '兑奖换购', 'value': 10},
   ];
 
   /// 商品类型选项（包装配置模式下动态追加「包装单位」，对齐小程序 itemypeList）
@@ -312,6 +319,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   final TextEditingController _promotionendtimeController = TextEditingController();
   final TextEditingController _intaxrateController = TextEditingController();
   final TextEditingController _outtaxrateController = TextEditingController();
+  final TextEditingController _custorderqtyminController = TextEditingController();
   final TextEditingController _deductvalueController = TextEditingController();
   final TextEditingController _validdayController = TextEditingController();
   final TextEditingController _joinrateController = TextEditingController();
@@ -366,6 +374,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     _promotionendtimeController: 'promotionendtime',
     _intaxrateController: 'intaxrate',
     _outtaxrateController: 'outtaxrate',
+    _custorderqtyminController: 'custorderqtymin',
     _deductvalueController: 'deductvalue',
     _validdayController: 'validday',
     _joinrateController: 'joinrate',
@@ -579,6 +588,13 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     final extendlistList = data[_extendlistKey] as List? ?? [];
     _form[_extendlistKey] = extendlistList.cast<Map<String, dynamic>>();
 
+    // 兑奖换购（itemtype=10）：明细取自 productSize10（与 Vue/Web 端一致）
+    final itemtype = _parseIntOr(data['itemtype'], 1);
+    if (itemtype == 10) {
+      final prizeDetails = data['productSize10'] as List? ?? [];
+      _form['prizelist'] = prizeDetails.cast<Map<String, dynamic>>();
+    }
+
     // 确保整型字段正确
     final intFields = {
       'itemtype': 1,
@@ -701,6 +717,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
         return 'productSize5';
       case 8:
         return 'productSize8';
+      case 10:
+        return 'productSize10';
       default:
         return 'productSize2'; // 其余暂定
     }
@@ -757,6 +775,17 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       Toast.show('请选择供应商');
       return false;
     }
+    // 采购/批发/配送单位必填（对齐 Vue edit.vue L904-913）
+    if ((_form['defcgunit']?.toString().trim() ?? '').isEmpty) {
+      Toast.show('请选择采购单位');
+      return false;
+    } else if ((_form['defpfunit']?.toString().trim() ?? '').isEmpty) {
+      Toast.show('请选择批发单位');
+      return false;
+    } else if ((_form['defpsunit']?.toString().trim() ?? '').isEmpty) {
+      Toast.show('请选择配送单位');
+      return false;
+    }
     // 特殊商品类型明细数据校验（Vue L875-888）
     final itemtype = (_form['itemtype'] ?? 1) as int;
     if ([2, 3, 4, 5].contains(itemtype)) {
@@ -768,6 +797,32 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     } else if (itemtype == 8) {
       if (_extendlistList.isEmpty) {
         Toast.show('请添加特价打包商品明细数据');
+        return false;
+      }
+    } else if (itemtype == 10) {
+      // 兑奖换购：至少选择一个兑换商品，且兑换数量必填、大于0（与 Vue/Web 端校验一致）
+      final prizeList = ((_form['prizelist'] ?? <Map<String, dynamic>>[]) as List)
+          .where((c) => (c['packageid']?.toString() ?? '').isNotEmpty)
+          .toList();
+      if (prizeList.isEmpty) {
+        Toast.show('请至少选择一个兑换商品');
+        return false;
+      }
+      final invalidPrize = prizeList.cast<Map<String, dynamic>>().firstWhere(
+        (c) {
+          final v = c['prizenum'];
+          if (v == null || v.toString().isEmpty) return true;
+          return (double.tryParse(v.toString()) ?? 0) <= 0;
+        },
+        orElse: () => <String, dynamic>{},
+      );
+      if (invalidPrize.isNotEmpty) {
+        final prizenum = invalidPrize['prizenum'];
+        if (prizenum == null || prizenum.toString().isEmpty) {
+          Toast.show('请输入兑换数量');
+        } else {
+          Toast.show('兑换数量必须大于0');
+        }
         return false;
       }
     } else if (itemtype == 9 && _packagSettingMode == 2) {
@@ -886,6 +941,10 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       'promotionendtime': _form['promotionendtime']?.toString() ?? '',
       'intaxrate': _form['intaxrate']?.toString().trim() ?? '',
       'outtaxrate': _form['outtaxrate']?.toString().trim() ?? '',
+      'custorderqtymin': _pv(_form['custorderqtymin']),
+      'defcgunit': _form['defcgunit']?.toString().trim() ?? '',
+      'defpfunit': _form['defpfunit']?.toString().trim() ?? '',
+      'defpsunit': _form['defpsunit']?.toString().trim() ?? '',
       'stockflag': _form['stockflag'] ?? 1,
       'initstorageflag': _form['initstorageflag'] ?? 0,
       'pointflag': _form['pointflag'] ?? 1,
@@ -918,7 +977,19 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       'sizedata': ((_form['sizedata'] ?? <Map<String, dynamic>>[]) as List)
           .where((e) => e['sbarcode']?.toString().isNotEmpty ?? false)
           .toList(),
+      // 兑奖换购（itemtype=10）：明细字段 prizelist 仅该类型保留（与 Vue/Web 端一致）
+      'prizelist': ((_form['prizelist'] ?? <Map<String, dynamic>>[]) as List)
+          .where((e) => (e['packageid']?.toString() ?? '').isNotEmpty)
+          .toList(),
     });
+    // prizelist 仅在 itemtype==10 时提交
+    if (_form['itemtype'] != 10) {
+      params.remove('prizelist');
+    }
+    // extendlist 仅在 itemtype 2/3/4/5/8 时提交
+    if (![2, 3, 4, 5, 8].contains(_form['itemtype'])) {
+      params.remove('extendlist');
+    }
     return params;
   }
 
@@ -992,6 +1063,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       _form['packpage'] = <Map<String, dynamic>>[];
       _form['packlinkpro'] = [_packlinkproDefaultRow()];
       _form[_extendlistKey] = <Map<String, dynamic>>[];
+      _form['prizelist'] = <Map<String, dynamic>>[];
       _form['sizedata'] = [Map<String, dynamic>.from(_formDefault)];
     });
     // 保留单位时回写 controller 显示值（前面统一 clear 会清空）
@@ -1033,6 +1105,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
+    // 键盘弹出时隐藏底部操作栏，避免遮挡输入框（MediaQuery 依赖自动响应键盘变化）
+    final keyboardVisible = MediaQuery.of(context).viewInsets.bottom > 0;
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
@@ -1082,7 +1156,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                   _buildPackConfigTab(),
               ],
             ),
-      bottomNavigationBar: _buildBottomBar(),
+      bottomNavigationBar: keyboardVisible ? null : _buildBottomBar(),
     );
   }
 
@@ -1305,6 +1379,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   Widget _buildBasisTab() {
     const kDivider = Divider(height: 1, color: Color(0xFFE6E6E6));
     return SingleChildScrollView(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.all(10),
       child: Container(
         decoration: BoxDecoration(
@@ -1448,6 +1523,69 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
             kDivider,
             // 经销方式（只读，联营/扣率代销/租赁时显示联营比例）
             _buildSelltypeRow(),
+            kDivider,
+            // 采购单位（必填，对齐小程序 basis.vue defcgunit）
+            _buildSelectRow(
+              label: '采购单位',
+              value: _form['defcgunit']?.toString() ?? '',
+              enabled: !_isReadOnly,
+              required: true,
+              labelWidth: 90,
+              onTap: () async {
+                final result = await SelectUnitPage.show(
+                  context,
+                  title: '选择采购单位',
+                  initialSelectedId: _form['defcgunit']?.toString(),
+                );
+                if (result != null && mounted) {
+                  setState(() {
+                    _form['defcgunit'] = result['name']?.toString() ?? '';
+                  });
+                }
+              },
+            ),
+            kDivider,
+            // 批发单位（必填，对齐小程序 basis.vue defpfunit）
+            _buildSelectRow(
+              label: '批发单位',
+              value: _form['defpfunit']?.toString() ?? '',
+              enabled: !_isReadOnly,
+              required: true,
+              labelWidth: 90,
+              onTap: () async {
+                final result = await SelectUnitPage.show(
+                  context,
+                  title: '选择批发单位',
+                  initialSelectedId: _form['defpfunit']?.toString(),
+                );
+                if (result != null && mounted) {
+                  setState(() {
+                    _form['defpfunit'] = result['name']?.toString() ?? '';
+                  });
+                }
+              },
+            ),
+            kDivider,
+            // 配送单位（必填，对齐小程序 basis.vue defpsunit）
+            _buildSelectRow(
+              label: '配送单位',
+              value: _form['defpsunit']?.toString() ?? '',
+              enabled: !_isReadOnly,
+              required: true,
+              labelWidth: 90,
+              onTap: () async {
+                final result = await SelectUnitPage.show(
+                  context,
+                  title: '选择配送单位',
+                  initialSelectedId: _form['defpsunit']?.toString(),
+                );
+                if (result != null && mounted) {
+                  setState(() {
+                    _form['defpsunit'] = result['name']?.toString() ?? '';
+                  });
+                }
+              },
+            ),
             kDivider,
             // 进货价
             _buildNumberField(
@@ -1618,6 +1756,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     final pointtype = (_form['pointtype'] ?? 1) as int;
 
     return SingleChildScrollView(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.all(10),
       child: _buildCard(
         child: Column(
@@ -1928,6 +2067,15 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
               readOnly: _isReadOnly,
               focusNode: _outtaxrateFocusNode,
             ),
+            kDivider,
+
+            // ── 批发起订量（对齐小程序 more.vue custorderqtymin）──
+            _buildNumberField(
+              controller: _custorderqtyminController,
+              label: '批发起订量',
+              hint: '请输入',
+              readOnly: _isReadOnly,
+            ),
           ],
         ),
       ),
@@ -1960,6 +2108,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                   ),
                 )
               : ListView.builder(
+                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                   padding: const EdgeInsets.symmetric(horizontal: 10),
                   itemCount: _packList.length,
                   itemBuilder: (context, index) {
@@ -2084,6 +2233,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   /// 跳转商品明细页面（根据 itemtype 跳转不同页面）
   /// itemtype 2/3/4/5 → CommodityPackPage（拆分/组装成份管理）
   /// itemtype 8     → CommodityBundlePage（特价打包商品管理）
+  /// itemtype 10    → CommodityPrizePage（兑奖换购管理）
   Future<void> _goToPackPage() async {
     final itemtype = _form['itemtype'] ?? 1;
     final result = await Navigator.push<List<Map<String, dynamic>>>(
@@ -2096,6 +2246,17 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
               productName: _form['name']?.toString().trim() ?? '',
             );
           }
+          if (itemtype == 10) {
+            return CommodityPrizePage(
+              prizelist: ((_form['prizelist'] ?? <Map<String, dynamic>>[]) as List)
+                  .cast<Map<String, dynamic>>(),
+              productName: _form['name']?.toString().trim() ?? '',
+              productSize: _form['size']?.toString().trim() ?? '',
+              productBarcode: _form['barcode']?.toString().trim() ?? '',
+              productSellprice: _form['sellprice']?.toString() ?? '',
+              readOnly: _isReadOnly,
+            );
+          }
           return CommodityPackPage(
             items: _extendlistList,
             productName: _form['name']?.toString().trim() ?? '',
@@ -2106,7 +2267,11 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       ),
     );
     if (result != null && mounted) {
-      setState(() => _form[_extendlistKey] = result);
+      if (itemtype == 10) {
+        setState(() => _form['prizelist'] = result);
+      } else {
+        setState(() => _form[_extendlistKey] = result);
+      }
     }
   }
 
@@ -2126,97 +2291,103 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
 
     showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(editIndex != null ? '编辑包装单位' : '新增包装单位'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: packnameCtrl,
-                decoration: const InputDecoration(
-                  labelText: '包装名称',
-                  hintText: '如：箱、件',
+      builder: (ctx) => AnimatedPadding(
+        // 键盘避让：弹窗整体上移，避免输入框被键盘遮挡
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: AlertDialog(
+          title: Text(editIndex != null ? '编辑包装单位' : '新增包装单位'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: packnameCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '包装名称',
+                    hintText: '如：箱、件',
+                  ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: packbarcodeCtrl,
-                decoration: const InputDecoration(labelText: '包装条码'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: packrateCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(labelText: '包装比率', hintText: '如：12'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: packpriceCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(labelText: '包装价格'),
-              ),
-            ],
+                const SizedBox(height: 12),
+                TextField(
+                  controller: packbarcodeCtrl,
+                  decoration: const InputDecoration(labelText: '包装条码'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: packrateCtrl,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: '包装比率', hintText: '如：12'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: packpriceCtrl,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: '包装价格'),
+                ),
+              ],
+            ),
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            TextButton(
+              onPressed: () {
+                if (packnameCtrl.text.trim().isEmpty) {
+                  Toast.show('请输入包装名称');
+                  return;
+                }
+
+                final inputBarcode = packbarcodeCtrl.text.trim();
+
+                // 校验包装条码是否与其他包装条码重复（排除自身）
+                for (int i = 0; i < _packList.length; i++) {
+                  if (i == editIndex) continue;
+                  if (_packList[i]['packbarcode']?.toString() == inputBarcode &&
+                      inputBarcode.isNotEmpty) {
+                    Toast.show('包装条码已存在');
+                    return;
+                  }
+                }
+
+                // 校验包装条码是否与规格条码冲突
+                for (final spec in _sizedata) {
+                  if (spec['sbarcode']?.toString() == inputBarcode && inputBarcode.isNotEmpty) {
+                    Toast.show('包装条码不能和规格条码相同');
+                    return;
+                  }
+                }
+
+                // 校验包装条码是否与商品主条码冲突
+                final mainBarcode = _form['barcode']?.toString().trim() ?? '';
+                if (inputBarcode == mainBarcode && inputBarcode.isNotEmpty) {
+                  Toast.show('包装条码不能和商品条码相同');
+                  return;
+                }
+
+                setState(() {
+                  final newPack = {
+                    'packname': packnameCtrl.text.trim(),
+                    'packbarcode': packbarcodeCtrl.text.trim(),
+                    'packrate': packrateCtrl.text.trim(),
+                    'packprice': packpriceCtrl.text.trim(),
+                  };
+                  if (editIndex != null && editIndex < _packList.length) {
+                    final list = List<Map<String, dynamic>>.from(_packList);
+                    list[editIndex] = {...list[editIndex], ...newPack};
+                    _form['packpage'] = list;
+                  } else {
+                    final list = List<Map<String, dynamic>>.from(_packList);
+                    list.add(newPack);
+                    _form['packpage'] = list;
+                  }
+                });
+                Navigator.pop(ctx);
+              },
+              child: const Text('确定'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          TextButton(
-            onPressed: () {
-              if (packnameCtrl.text.trim().isEmpty) {
-                Toast.show('请输入包装名称');
-                return;
-              }
-
-              final inputBarcode = packbarcodeCtrl.text.trim();
-
-              // 校验包装条码是否与其他包装条码重复（排除自身）
-              for (int i = 0; i < _packList.length; i++) {
-                if (i == editIndex) continue;
-                if (_packList[i]['packbarcode']?.toString() == inputBarcode &&
-                    inputBarcode.isNotEmpty) {
-                  Toast.show('包装条码已存在');
-                  return;
-                }
-              }
-
-              // 校验包装条码是否与规格条码冲突
-              for (final spec in _sizedata) {
-                if (spec['sbarcode']?.toString() == inputBarcode && inputBarcode.isNotEmpty) {
-                  Toast.show('包装条码不能和规格条码相同');
-                  return;
-                }
-              }
-
-              // 校验包装条码是否与商品主条码冲突
-              final mainBarcode = _form['barcode']?.toString().trim() ?? '';
-              if (inputBarcode == mainBarcode && inputBarcode.isNotEmpty) {
-                Toast.show('包装条码不能和商品条码相同');
-                return;
-              }
-
-              setState(() {
-                final newPack = {
-                  'packname': packnameCtrl.text.trim(),
-                  'packbarcode': packbarcodeCtrl.text.trim(),
-                  'packrate': packrateCtrl.text.trim(),
-                  'packprice': packpriceCtrl.text.trim(),
-                };
-                if (editIndex != null && editIndex < _packList.length) {
-                  final list = List<Map<String, dynamic>>.from(_packList);
-                  list[editIndex] = {...list[editIndex], ...newPack};
-                  _form['packpage'] = list;
-                } else {
-                  final list = List<Map<String, dynamic>>.from(_packList);
-                  list.add(newPack);
-                  _form['packpage'] = list;
-                }
-              });
-              Navigator.pop(ctx);
-            },
-            child: const Text('确定'),
-          ),
-        ],
       ),
     );
   }
@@ -2258,6 +2429,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       _form['packlinkpro'] = [_packlinkproDefaultRow()];
     }
     return ListView.builder(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 120),
       cacheExtent: 800,
       itemCount: _packlinkpro.length,
@@ -2878,8 +3050,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     final itemtype = _form['itemtype'] ?? 1;
     final selectedLabel = _itemTypeOptionList.firstWhere((option) => option['value'] == itemtype,
         orElse: () => _itemTypeOptionList.first)['label'] as String;
-    // 是否显示右侧管理链接（仅拆分/组装/特价打包类商品）
-    final showLink = [2, 3, 4, 5, 8].contains(itemtype);
+    // 是否显示右侧管理链接（拆分/组装/特价打包/兑奖换购类商品）
+    final showLink = [2, 3, 4, 5, 8, 10].contains(itemtype);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: SizedBox(
@@ -2916,7 +3088,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                 ),
               ),
             ),
-            // 右侧管理链接：itemtype 2/3/4/5 → 商品明细，itemtype 8 → 特价打包商品
+            // 右侧管理链接：itemtype 2/3/4/5 → 商品明细，itemtype 8 → 特价打包商品，itemtype 10 → 兑奖换购
             if (showLink && !_isReadOnly) ...[
               const SizedBox(width: 6),
               GestureDetector(
@@ -2925,7 +3097,12 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                   height: 24,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   alignment: Alignment.center,
-                  child: Text(itemtype == 8 ? '特价打包商品' : selectedLabel,
+                  child: Text(
+                      itemtype == 8
+                          ? '特价打包商品'
+                          : itemtype == 10
+                              ? '兑奖换购'
+                              : selectedLabel,
                       style: const TextStyle(fontSize: 11, color: Color(0xFF006EFF))),
                 ),
               ),
@@ -2966,8 +3143,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   ///   端点切换：notAutoGenerateBarcode==1 时使用 barCodeGeneration
   ///   isSc=true（自动调用）：已有条码则跳过
   void _autoGenerateBarcode({required bool isSc}) {
-    if ((_form['typeid']?.toString() ?? '').isEmpty &&
-        (_form['supid']?.toString() ?? '').isEmpty) {
+    if ((_form['typeid']?.toString() ?? '').isEmpty && (_form['supid']?.toString() ?? '').isEmpty) {
       Toast.show('请先选择商品分类');
       return;
     }
@@ -3079,7 +3255,10 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
 
     request(
             HttpApi.getTypeOfCode,
-            {'value': typecode, 'type': 1,},
+            {
+              'value': typecode,
+              'type': 1,
+            },
             false,
             false)
         .then((result) {
@@ -3112,24 +3291,38 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) {
-          return Padding(
-            padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          // 键盘避让：sheet 内部 MediaQuery 的 viewInsets 已被移除，
+          // 改用 View 读取真实键盘高度（View 不受 removeViewInsets 影响）
+          final keyboardHeight = View.of(ctx).viewInsets.bottom;
+          final keyboardVisible = keyboardHeight > 0;
+          return AnimatedPadding(
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOut,
+            padding: EdgeInsets.only(bottom: keyboardHeight),
             child: Container(
-              constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.6),
+              constraints: BoxConstraints(
+                // 键盘弹出时占满剩余空间，避免弹窗被过度压缩导致输入框不可见/溢出
+                maxHeight: keyboardVisible
+                    ? MediaQuery.of(ctx).size.height - keyboardHeight
+                    : MediaQuery.of(ctx).size.height * 0.6,
+              ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // 标题（左对齐，右侧关闭按钮）
+                  // 标题（居中，右侧关闭按钮）
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 4, 12),
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
                     child: Row(
                       children: [
-                        const Text('一品多码',
-                            style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF111827))),
-                        const Spacer(),
+                        const SizedBox(width: 44),
+                        const Expanded(
+                          child: Text('一品多码',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF111827))),
+                        ),
                         GestureDetector(
                           onTap: () => Navigator.pop(ctx),
                           child: const Padding(
@@ -3156,19 +3349,19 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                         ),
                         children: [
                           // 表头行
-                          TableRow(
-                            decoration: const BoxDecoration(color: Color(0xFFE8F0FE)),
+                          const TableRow(
+                            decoration: BoxDecoration(color: Color(0xFFE8F0FE)),
                             children: [
                               Padding(
-                                padding: const EdgeInsets.fromLTRB(12, 13, 8, 13),
+                                padding: EdgeInsets.fromLTRB(12, 13, 8, 13),
                                 child: Text('序号', style: headerStyle),
                               ),
                               Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+                                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 13),
                                 child: Text('条码', style: headerStyle),
                               ),
                               Padding(
-                                padding: const EdgeInsets.fromLTRB(0, 13, 8, 13),
+                                padding: EdgeInsets.fromLTRB(0, 13, 8, 13),
                                 child: Text('操作', textAlign: TextAlign.right, style: headerStyle),
                               ),
                             ],
@@ -3186,22 +3379,43 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                                 ),
                                 Padding(
                                   padding: const EdgeInsets.symmetric(vertical: 10),
-                                  child: TextField(
-                                    controller: controllers[i],
-                                    keyboardType: TextInputType.number,
-                                    maxLength: 18,
-                                    style: cellStyle,
-                                    decoration: const InputDecoration(
-                                      hintText: '请输入条码',
-                                      hintStyle:
-                                          TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
-                                      border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.all(Radius.circular(6))),
-                                      isDense: true,
-                                      contentPadding:
-                                          EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                                      counterText: '',
-                                    ),
+                                  child: Builder(
+                                    builder: (inputCtx) {
+                                      return TextField(
+                                        controller: controllers[i],
+                                        keyboardType: TextInputType.number,
+                                        maxLength: 18,
+                                        style: cellStyle,
+                                        onTap: () {
+                                          // 键盘弹出会压缩弹窗高度，等动画结束后再滚动到输入框，
+                                          // 避免“点击时可见、键盘弹出后被遮挡”的时序问题
+                                          Future.delayed(const Duration(milliseconds: 350), () {
+                                            if (!inputCtx.mounted) return;
+                                            try {
+                                              Scrollable.ensureVisible(
+                                                inputCtx,
+                                                alignment: 0.5,
+                                                duration: const Duration(milliseconds: 200),
+                                                curve: Curves.easeOut,
+                                              );
+                                            } catch (_) {
+                                              // 弹窗已关闭、widget 已从树中移除（deactivated）时忽略
+                                            }
+                                          });
+                                        },
+                                        decoration: const InputDecoration(
+                                          hintText: '请输入条码',
+                                          hintStyle:
+                                              TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+                                          border: OutlineInputBorder(
+                                              borderRadius: BorderRadius.all(Radius.circular(6))),
+                                          isDense: true,
+                                          contentPadding:
+                                              EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                                          counterText: '',
+                                        ),
+                                      );
+                                    },
                                   ),
                                 ),
                                 // 操作：删除行，最后一行追加“添加”按钮
@@ -3225,16 +3439,16 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                                             size: 20, color: Color(0xFFEF4444)),
                                       ),
                                       if (i == controllers.length - 1) ...[
-                                          const SizedBox(width: 8),
-                                          GestureDetector(
-                                            onTap: () {
-                                              setDialogState(() {
-                                                controllers.add(TextEditingController());
-                                              });
-                                            },
-                                            child: const Icon(Icons.add_circle_outline,
-                                                size: 20, color: Color(0xFF006EFF)),
-                                          ),
+                                        const SizedBox(width: 8),
+                                        GestureDetector(
+                                          onTap: () {
+                                            setDialogState(() {
+                                              controllers.add(TextEditingController());
+                                            });
+                                          },
+                                          child: const Icon(Icons.add_circle_outline,
+                                              size: 20, color: Color(0xFF006EFF)),
+                                        ),
                                       ],
                                     ],
                                   ),
@@ -3245,49 +3459,55 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                       ),
                     ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: GestureDetector(
-                            onTap: () => Navigator.pop(ctx),
-                            child: Container(
-                              height: 40,
-                              decoration: BoxDecoration(
-                                border: Border.all(color: const Color(0xFFD1D5DB)),
-                                borderRadius: BorderRadius.circular(8),
+                  // 键盘弹出时隐藏底部按钮行，给输入区域留足空间，避免弹窗被过度压缩
+                  if (!keyboardVisible)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () => Navigator.pop(ctx),
+                              child: Container(
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: const Color(0xFFD1D5DB)),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                alignment: Alignment.center,
+                                child: const Text('取消',
+                                    style: TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
                               ),
-                              alignment: Alignment.center,
-                              child: const Text('取消',
-                                  style: TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: GestureDetector(
-                            onTap: () {
-                              setState(() {
-                                _codes = controllers.map((c) => {'code': c.text.trim()}).toList();
-                              });
-                              Navigator.pop(ctx);
-                            },
-                            child: Container(
-                              height: 40,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF006EFF),
-                                borderRadius: BorderRadius.circular(8),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () {
+                                setState(() {
+                                  // 过滤空条码行（对齐小程序：空行不保存）
+                                  _codes = controllers
+                                      .map((c) => {'code': c.text.trim()})
+                                      .where((item) => (item['code']?.toString() ?? '').isNotEmpty)
+                                      .toList();
+                                });
+                                Navigator.pop(ctx);
+                              },
+                              child: Container(
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF006EFF),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                alignment: Alignment.center,
+                                child: const Text('确定',
+                                    style: TextStyle(fontSize: 14, color: Colors.white)),
                               ),
-                              alignment: Alignment.center,
-                              child: const Text('确定',
-                                  style: TextStyle(fontSize: 14, color: Colors.white)),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -3687,6 +3907,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     required String value,
     required VoidCallback onTap,
     bool enabled = true,
+    bool required = false,
     double labelWidth = 80,
   }) {
     return GestureDetector(
@@ -3700,9 +3921,20 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
             children: [
               SizedBox(
                 width: labelWidth,
-                child: Text(label,
-                    style: const TextStyle(
-                        fontSize: 14, color: Color(0xFF374151), fontWeight: FontWeight.w500)),
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Text(label,
+                        style: const TextStyle(
+                            fontSize: 14, color: Color(0xFF374151), fontWeight: FontWeight.w500)),
+                    if (required)
+                      const Positioned(
+                        left: -10,
+                        top: 0,
+                        child: Text('*', style: TextStyle(color: Color(0xFFEF4444), fontSize: 13)),
+                      ),
+                  ],
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(

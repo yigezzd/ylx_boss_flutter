@@ -51,6 +51,10 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
   String? _outcountertype;
   String? _insid; // 收货门店
   String? _instorename;
+  String? _outhandlerid; // 发货经手人
+  String? _outhandlername;
+  String? _inhandlerid; // 收货经手人
+  String? _inhandlername;
   String? _psname; // 送货员
   String? _psuserid;
   String? _yhbillid; // 要货申请单id
@@ -239,6 +243,11 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
           _outcountertype = data['outcountertype']?.toString();
           _insid = data['insid']?.toString();
           _instorename = data['instorename']?.toString();
+          // 对齐 Vue form fields：发货/收货经手人
+          _outhandlerid = data['outhandlerid']?.toString();
+          _outhandlername = data['outhandlername']?.toString();
+          _inhandlerid = data['inhandlerid']?.toString();
+          _inhandlername = data['inhandlername']?.toString();
           _psname = data['psname']?.toString();
           _psuserid = data['psuserid']?.toString();
           _yhbillid = data['yhbillid']?.toString();
@@ -342,6 +351,11 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
     params['outcountertype'] = _outcountertype ?? '';
     params['insid'] = _insid ?? '';
     params['instorename'] = _instorename ?? '';
+    // 对齐 Vue form fields：发货/收货经手人
+    params['outhandlerid'] = _outhandlerid ?? '';
+    params['outhandlername'] = _outhandlername ?? '';
+    params['inhandlerid'] = _inhandlerid ?? '';
+    params['inhandlername'] = _inhandlername ?? '';
     params['psname'] = _psname ?? '';
     params['psuserid'] = _psuserid ?? '';
     params['yhbillid'] = _yhbillid ?? '';
@@ -356,8 +370,14 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
 
     request(HttpApi.psstockoutSave, params).then((result) {
       if (!mounted) return;
-      Toast.show(result['retmsg']?.toString() ?? '保存成功');
       final retData = result['data'];
+      // 保存后进入多级审批流程时，不提示保存成功和接口返回信息
+      final bool enterApproval = withSign &&
+          retData is Map<String, dynamic> &&
+          _parseReviewList(retData['reviewFlowUsers']).isNotEmpty;
+      if (!enterApproval) {
+        Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
         if (isNew) {
@@ -418,7 +438,7 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
     setState(() => _submitAction = _DeliverAction.sign);
     request(HttpApi.psstockoutSign, params).then((result) {
       if (!mounted) return;
-      Toast.show('审核成功');
+      Toast.show(result['retmsg']?.toString() ?? '审核成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _DeliverAction.none);
@@ -449,7 +469,7 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
     final params = Map<String, dynamic>.from(_billData!);
     request(HttpApi.psstockoutRetsign, params).then((result) {
       if (!mounted) return;
-      Toast.show('反审成功');
+      Toast.show(result['retmsg']?.toString() ?? '反审成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _DeliverAction.none);
@@ -477,8 +497,19 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
     if (confirm != true) return;
 
     // 对齐 Vue：query.value.reviewsignflag = 2 → save(1)
-    _billData!['reviewsignflag'] = 2;
-    _submit(withSign: true);
+    // 直接调 sign API 绕过保存流程，避免 _doSignAfterSave 误弹审批弹窗
+    setState(() => _submitAction = _DeliverAction.withdraw);
+    final params = Map<String, dynamic>.from(_billData!);
+    params['reviewsignflag'] = 2;
+    params['reviewremark'] = '';
+    params['signflag'] = 1;
+    request(HttpApi.psstockoutSign, params).then((result) {
+      if (!mounted) return;
+      Toast.show(result['retmsg']?.toString() ?? '撤回成功');
+      _loadDetail(_billData);
+    }).whenComplete(() {
+      if (mounted) setState(() => _submitAction = _DeliverAction.none);
+    });
   }
 
   /// 删除单据（对齐 Vue delBill）
@@ -577,8 +608,8 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
   }
 
   /// 对齐 PC 版 deliver/edit.vue warehouse.vue isCurrentOutflag 机制：已选配送中心且出库仓库为空时，
-  /// 自动带出该配送中心的默认出库仓库（stockoutflag==1，多条按 countertype 升序取第一条），
-  /// 无默认出库仓库则保持为空待手动选择；区域中心（storetype==4）登录不自动带出
+  /// 自动带出该配送中心的默认出库仓库（按 countertype 优先级取：零售(0) > 常温(1) > 冷藏(2) > 冷冻(3)），
+  /// 无可用仓库则保持为空待手动选择；区域中心（storetype==4）登录不自动带出
   Future<void> _autoFillDefaultOutCounter() async {
     final String outsid = _outsid ?? '';
     if (outsid.isEmpty || (_outcounterid ?? '').isNotEmpty) return;
@@ -587,13 +618,13 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
     try {
       final result = await request(HttpApi.counterGetList, {
         'sids': [int.tryParse(outsid) ?? 0],
-        'nosidsflag': 1,
+        // 'nosidsflag': 1,
         'stopflag': 0,
         // 对齐 Vue wareFormItem mergeData：总店作为配送中心时仅查配送仓
-        'pscounterflag': outsid == _spid.toString() ? '1' : '',
-        'field': 'countercode',
-        'type': 'asc',
-        'cond': '',
+        // 'pscounterflag': outsid == _spid.toString() ? '1' : '',
+        // 'field': 'countercode',
+        // 'type': 'asc',
+        // 'cond': '',
         // 对齐 Vue warehouse.vue is_page: '0'：全量拉取后本地筛选默认出库仓
         'is_page': 0,
       });
@@ -601,15 +632,21 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
       final data = result['data'];
       final list =
           data is Map<String, dynamic> ? (data['list'] as List? ?? const []) : const <dynamic>[];
-      // 对齐 Vue warehouse.vue：stockoutflag==1 为默认出库仓库
+      // 筛选默认出库仓库（stockoutflag==1），按 countertype 优先级取默认仓库：
+      // 零售(0) > 常温(1) > 冷藏(2) > 冷冻(3)，无类型字段的排在最后
       final matches = list
           .whereType<Map<String, dynamic>>()
           .where((e) => e['stockoutflag']?.toString() == '1')
           .toList();
       if (matches.isEmpty) return;
-      // 对齐 Vue warehouse.vue：多条默认出库仓按 countertype 升序取第一条
-      matches.sort((a, b) => (int.tryParse(a['countertype']?.toString() ?? '0') ?? 0)
-          .compareTo(int.tryParse(b['countertype']?.toString() ?? '0') ?? 0));
+      matches.sort((a, b) {
+        final va = int.tryParse(a['countertype']?.toString() ?? '');
+        final vb = int.tryParse(b['countertype']?.toString() ?? '');
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1; // 无类型排最后
+        if (vb == null) return -1;
+        return va.compareTo(vb);
+      });
       if (!mounted || _outsid != outsid) return;
       final first = matches.first;
       setState(() {
@@ -640,6 +677,65 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
       setState(() {
         _insid = result['storeid']?.toString() ?? '';
         _instorename = result['storename']?.toString() ?? '';
+      });
+    }
+  }
+
+  // =================== 经手人选择（对齐 Vue handler-form-item） ===================
+  /// 选择发货经手人（对齐 Vue mergeData: { sids: form.outsid }）
+  Future<void> _selectOutHandler() async {
+    if ((_outsid ?? '').isEmpty) {
+      Toast.show('请先选择配送中心');
+      return;
+    }
+    final result = await CommonSelectSheet.show(
+      context,
+      title: '选择发货经手人',
+      searchHint: '输入经手人名称/编码',
+      initialSelectedId: _outhandlerid,
+      idField: 'userid',
+      fetchData: (searchText, page) => request(HttpApi.sysUserList, {
+        'cond': searchText,
+        'sids': [_outsid],
+      }).then((result) {
+        final data = result['data'];
+        return data is Map<String, dynamic> ? data : null;
+      }),
+      mapResult: (item) => item,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _outhandlerid = result['userid']?.toString() ?? '';
+        _outhandlername = result['name']?.toString() ?? '';
+      });
+    }
+  }
+
+  /// 选择收货经手人（对齐 Vue mergeData: { sids: form.insid }）
+  Future<void> _selectInHandler() async {
+    if ((_insid ?? '').isEmpty) {
+      Toast.show('请先选择收货门店');
+      return;
+    }
+    final result = await CommonSelectSheet.show(
+      context,
+      title: '选择收货经手人',
+      searchHint: '输入经手人名称/编码',
+      initialSelectedId: _inhandlerid,
+      idField: 'userid',
+      fetchData: (searchText, page) => request(HttpApi.sysUserList, {
+        'cond': searchText,
+        'sids': [_insid],
+      }).then((result) {
+        final data = result['data'];
+        return data is Map<String, dynamic> ? data : null;
+      }),
+      mapResult: (item) => item,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _inhandlerid = result['userid']?.toString() ?? '';
+        _inhandlername = result['name']?.toString() ?? '';
       });
     }
   }
@@ -837,7 +933,15 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
       Toast.show('请选择配送中心');
       return;
     }
-    final result = await Navigator.push<List<Map<String, dynamic>>>(
+    final result = await _openSelectProductPage();
+    if (result != null && mounted) {
+      _applySelectedProducts(result);
+    }
+  }
+
+  /// 打开选择商品页（扫码命中多条商品时以 initialKeyword 自动粘贴条码搜索）
+  Future<List<Map<String, dynamic>>?> _openSelectProductPage({String? keyword}) {
+    return Navigator.push<List<Map<String, dynamic>>>(
       context,
       MaterialPageRoute(
         builder: (_) => SelectProductPage(
@@ -865,35 +969,53 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
             'instockqty',
             'psamt'
           ],
+          // 带入扫描条码：选择页首次加载即按该条码搜索，展示全部命中商品供用户挑选
+          initialKeyword: keyword,
         ),
       ),
     );
-    if (result != null && mounted) {
-      setState(() {
-        for (final row in _items) {
-          row.dispose();
-        }
-        _items.clear();
-        for (final prod in result) {
-          final c = Map<String, dynamic>.from(prod);
-          // 对齐 Vue handleProperty：price = lspsprice
-          c['price'] =
-              MathUtils.formatDecimal(2, double.tryParse(c['lspsprice']?.toString() ?? '0') ?? 0);
-          _applyWriteData(c);
-          final row = _DetailRow()
-            ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
-            ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
-            ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
-            ..qtyController.text = c['qty']?.toString() ?? '0'
-            ..priceController.text = c['price']?.toString() ?? '0'
-            ..batchController.text = c['batchno']?.toString() ?? ''
-            ..rawData = c;
-          row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
-          row.amtController.text = c['amt']?.toString() ?? '';
-          row.batchno = c['batchno']?.toString() ?? '';
-          _items.add(row);
-        }
-      });
+  }
+
+  /// 选择页确认后整体回填明细（对齐 Vue onSelectProduct：选择页已选区含当前明细）
+  void _applySelectedProducts(List<Map<String, dynamic>> result) {
+    setState(() {
+      for (final row in _items) {
+        row.dispose();
+      }
+      _items.clear();
+      for (final prod in result) {
+        final c = Map<String, dynamic>.from(prod);
+        // 对齐 Vue handleProperty：price = lspsprice
+        c['price'] =
+            MathUtils.formatDecimal(2, double.tryParse(c['lspsprice']?.toString() ?? '0') ?? 0);
+        _applyWriteData(c);
+        final row = _DetailRow()
+          ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
+          ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
+          ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
+          ..qtyController.text = c['qty']?.toString() ?? '0'
+          ..priceController.text = c['price']?.toString() ?? '0'
+          ..batchController.text = c['batchno']?.toString() ?? ''
+          ..rawData = c;
+        row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
+        row.amtController.text = c['amt']?.toString() ?? '';
+        row.batchno = c['batchno']?.toString() ?? '';
+        _items.add(row);
+      }
+    });
+  }
+
+  /// 扫描条码命中多条商品时进入选择商品页（避免误取第一条），
+  /// 用户挑选确认后焦点交还扫码输入框，便于 PDA 连续录入
+  Future<void> _pickFromMultiple(String code, {FocusNode? returnFocusNode}) async {
+    final result = await _openSelectProductPage(keyword: code);
+    if (!mounted) return;
+    if (result != null) {
+      _applySelectedProducts(result);
+    }
+    // 无论确认/取消，均将焦点交还扫码输入框，便于 PDA 连续录入
+    if (returnFocusNode != null && mounted) {
+      returnFocusNode.requestFocus();
     }
   }
 
@@ -948,6 +1070,12 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
       final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
       if (list.isEmpty) {
         Toast.show('未查询到该商品');
+        return;
+      }
+      if (list.length > 1) {
+        // 同一(秤)条码命中多条商品时无法自动确定目标：
+        // 进入选择商品页并将条码粘贴到搜索框自动搜索，供用户挑选
+        _pickFromMultiple(searchCode, returnFocusNode: returnFocusNode);
         return;
       }
       final prod = list.first as Map<String, dynamic>;
@@ -1241,9 +1369,20 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
                 child: _buildCard(
                     title: '单据信息',
                     child: _readOnly ? _buildBillInfoReadonly() : _buildBillInfoEditable()))),
-        SliverToBoxAdapter(
-            child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 10, 8, 0), child: _buildProductHeader())),
+        // 粘性表头：扫描框 + 商品明细标题栏（固定不随商品列表滚动）
+        PinnedHeaderSliver(
+            child: ColoredBox(
+                color: const Color(0xFFF5F5F5),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  if (_showScanInput) ...[
+                    Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 0), child: _buildScanInput()),
+                    const SizedBox(height: 8),
+                  ],
+                  Padding(
+                      padding: EdgeInsets.fromLTRB(8, _showScanInput ? 0 : 10, 8, 0),
+                      child: _buildProductHeader())
+                ]))),
         if (_items.isNotEmpty)
           SliverList.builder(
               itemCount: _items.length,
@@ -1276,6 +1415,51 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
       ])),
       if (!keyboardVisible) _buildBottomBar(),
     ]);
+  }
+
+  /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入）
+  bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
+
+  // =================== 条码扫描输入框（对齐 allot_apply） ===================
+  Widget _buildScanInput() {
+    return Container(
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5)),
+        child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Row(children: [
+              Expanded(
+                  child: TextField(
+                controller: _scanController,
+                focusNode: _scanFocusNode,
+                autofocus: true,
+                showCursor: true,
+                keyboardType: TextInputType.none,
+                enableInteractiveSelection: false,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
+                textInputAction: TextInputAction.search,
+                decoration: const InputDecoration(
+                  hintText: '请将扫描枪对准商品条码',
+                  hintStyle: TextStyle(fontSize: 13, color: Color(0xFFD1D5DB)),
+                  border: OutlineInputBorder(
+                    borderSide: BorderSide(color: Color(0xFFE5E7EB)),
+                    borderRadius: BorderRadius.all(Radius.circular(8)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: Color(0xFFE5E7EB)),
+                    borderRadius: BorderRadius.all(Radius.circular(8)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: Color(0xFF006EFF)),
+                    borderRadius: BorderRadius.all(Radius.circular(8)),
+                  ),
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              )),
+            ])));
   }
 
   Widget _buildProductHeader() {
@@ -1464,6 +1648,10 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildReadonlyField(label: '要货申请单', value: _yhbillno ?? ''),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      _buildReadonlyField(label: '发货经手人', value: _outhandlername ?? ''),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      _buildReadonlyField(label: '收货经手人', value: _inhandlername ?? ''),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildReadonlyField(label: '送货员', value: _psname ?? ''),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildReadonlyField(label: '备注', value: _remarkController.text),
@@ -1471,18 +1659,33 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
   }
 
   Widget _buildBillInfoEditable() {
+    // 左侧标签文字宽度在原 80 基础上增加 1/3（80*4/3≈107），避免"配送中心仓库"等长标签折行
+    const double labelWidth = 107;
     return Column(children: [
       SelectFieldItem(
-          label: '配送中心', required: true, value: _outstorename ?? '', onTap: _selectOutStore),
+          label: '配送中心',
+          labelWidth: labelWidth,
+          required: true,
+          value: _outstorename ?? '',
+          onTap: _selectOutStore),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
-          label: '出库仓库', required: true, value: _outcountername ?? '', onTap: _selectOutCounter),
+          label: '出库仓库',
+          labelWidth: labelWidth,
+          required: true,
+          value: _outcountername ?? '',
+          onTap: _selectOutCounter),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
-          label: '收货门店', required: true, value: _instorename ?? '', onTap: _selectInStore),
+          label: '收货门店',
+          labelWidth: labelWidth,
+          required: true,
+          value: _instorename ?? '',
+          onTap: _selectInStore),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
           label: '配送时间',
+          labelWidth: labelWidth,
           value: _billdateController.text,
           onTap: () async {
             final now = DateTime.now();
@@ -1500,9 +1703,25 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
               });
           }),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
-      SelectFieldItem(label: '要货申请单', value: _yhbillno ?? '', onTap: _selectYhApply),
+      SelectFieldItem(
+          label: '要货申请单', labelWidth: labelWidth, value: _yhbillno ?? '', onTap: _selectYhApply),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
-      SelectFieldItem(label: '送货员', value: _psname ?? '', onTap: _selectDeliveryPerson),
+      // 对齐 Vue handler-form-item：发货经手人（依赖配送中心，未选时点击提示）
+      SelectFieldItem(
+          label: '发货经手人',
+          labelWidth: labelWidth,
+          value: _outhandlername ?? '',
+          onTap: _selectOutHandler),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      // 对齐 Vue handler-form-item：收货经手人（依赖收货门店，未选时点击提示）
+      SelectFieldItem(
+          label: '收货经手人',
+          labelWidth: labelWidth,
+          value: _inhandlername ?? '',
+          onTap: _selectInHandler),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      SelectFieldItem(
+          label: '送货员', labelWidth: labelWidth, value: _psname ?? '', onTap: _selectDeliveryPerson),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildField(controller: _remarkController, label: '备注', hint: '请输入备注信息'),
     ]);
@@ -1800,7 +2019,8 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         child: Row(children: [
           SizedBox(
-              width: 80,
+              // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+              width: 107,
               child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280)))),
           Expanded(
               child: Text(value.isNotEmpty ? value : '-',
@@ -1821,7 +2041,8 @@ class _DeliverEditPageState extends State<DeliverEditPage> with LogPageMixin<Del
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+            width: 107,
             child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF374151))),
           ),
           Expanded(
@@ -1921,20 +2142,26 @@ class _DetailItemState extends State<_DetailItem> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: data,
-        initialQty: qty,
-        initialSellprice: sellprice,
-        initialPrice: price,
-        initialAmt: currentAmt,
-        initialBatch: widget.row.batchController.text,
-        initialBirthdate: data['birthdate']?.toString() ?? '',
-        initialValiddate: data['validdate']?.toString() ?? '',
-        initialRemark: data['remark']?.toString() ?? '',
-        bsid: widget.bsid,
-        counterid: widget.counterid,
-        insid: widget.insid,
-        outsid: widget.outsid,
+      builder: (_) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免数量输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: data,
+          initialQty: qty,
+          initialSellprice: sellprice,
+          initialPrice: price,
+          initialAmt: currentAmt,
+          initialBatch: widget.row.batchController.text,
+          initialBirthdate: data['birthdate']?.toString() ?? '',
+          initialValiddate: data['validdate']?.toString() ?? '',
+          initialRemark: data['remark']?.toString() ?? '',
+          bsid: widget.bsid,
+          counterid: widget.counterid,
+          insid: widget.insid,
+          outsid: widget.outsid,
+        ),
       ),
     ).then((result) {
       if (result == null) return;
@@ -2459,6 +2686,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
           Expanded(
               child: TextField(
                   controller: _batchCtrl,
+                  // 商品批次只能选择，不支持手动录入
+                  readOnly: true,
                   keyboardType: TextInputType.text,
                   textAlign: TextAlign.right,
                   style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
@@ -2466,41 +2695,45 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                       border: InputBorder.none,
                       isDense: true,
                       contentPadding: EdgeInsets.zero,
-                      hintStyle: TextStyle(fontSize: 14, color: Color(0xFFD1D5DB))))),
+                      hintStyle: TextStyle(fontSize: 14, color: Color(0xFFD1D5DB))),
+                  onTap: _pickBatch)),
           const SizedBox(width: 4),
           GestureDetector(
-              onTap: () async {
-                final productid = widget.productData['productid']?.toString() ??
-                    widget.productData['prodid']?.toString() ??
-                    '';
-                if (productid.isEmpty) {
-                  Toast.show('商品信息异常');
-                  return;
-                }
-                FocusScope.of(context).unfocus();
-                final result = await showModalBottomSheet<Map<String, dynamic>>(
-                    context: context,
-                    isScrollControlled: true,
-                    backgroundColor: Colors.transparent,
-                    builder: (_) => SelectBatchSheet(
-                        productid: productid,
-                        bsid: widget.bsid,
-                        counterid: widget.counterid,
-                        // 对齐 Vue select-batch：配送发货不传 costflag
-                        costflag: false,
-                        initialBatchNo: _batchCtrl.text));
-                if (result != null && mounted) {
-                  setState(() {
-                    _batchCtrl.text = result['batchno']?.toString() ?? '';
-                    final bd = _formatBatchDate(result['birthdate']);
-                    _birthdateCtrl.text = bd;
-                    final vd = _formatBatchDate(result['validdate']);
-                    _validdateCtrl.text = vd.isEmpty ? bd : vd;
-                  });
-                }
-              },
+              onTap: _pickBatch,
               child: const Icon(Icons.chevron_right, size: 20, color: Color(0xFFD1D5DB)))
         ]));
+  }
+
+  /// 打开批次选择器（商品批次只能选择）
+  Future<void> _pickBatch() async {
+    final productid = widget.productData['productid']?.toString() ??
+        widget.productData['prodid']?.toString() ??
+        '';
+    if (productid.isEmpty) {
+      Toast.show('商品信息异常');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (_) => SelectBatchSheet(
+            productid: productid,
+            bsid: widget.bsid,
+            counterid: widget.counterid,
+            // 对齐 Vue select-batch：配送发货不传 costflag
+            costflag: false,
+            initialBatchNo: _batchCtrl.text));
+    if (result != null && mounted) {
+      setState(() {
+        _batchCtrl.text = result['batchno']?.toString() ?? '';
+        final bd = _formatBatchDate(result['birthdate']);
+        _birthdateCtrl.text = bd;
+        final vd = _formatBatchDate(result['validdate']);
+        _validdateCtrl.text = vd.isEmpty ? bd : vd;
+      });
+    }
   }
 
   Widget _buildInfoRow(String label, String value) => Padding(
@@ -2914,7 +3147,10 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           // 审批意见
           Row(
             children: [
-              const Text('*审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              const Text.rich(TextSpan(children: [
+                TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+                TextSpan(text: '审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              ])),
               const SizedBox(width: 16),
               GestureDetector(
                 onTap: () => setState(() => _flag = 1),
@@ -2937,10 +3173,13 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           ),
           const SizedBox(height: 20),
           // 备注/驳回原因
-          Text(
-            _flag == 1 ? '备注信息：' : '*驳回原因：',
-            style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-          ),
+          if (_flag == 1)
+            const Text('备注信息：', style: TextStyle(fontSize: 14, color: Color(0xFF333333)))
+          else
+            const Text.rich(TextSpan(children: [
+              TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+              TextSpan(text: '驳回原因：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+            ])),
           const SizedBox(height: 8),
           Stack(children: [
             TextField(
@@ -3050,17 +3289,20 @@ class _ApprovalLogSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(children: [
       Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            const Expanded(
-                child: Center(
-                    child:
-                        Text('审批日志', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)))),
-            GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: const Padding(
-                    padding: EdgeInsets.all(4),
-                    child: Icon(Icons.close, size: 20, color: Color(0xFF999999))))
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          child: Row(children: [
+            // 左侧对称占位（与右侧关闭热区等宽），保证标题居中
+            const Spacer(),
+            const Text('审批日志', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            // 关闭热区：宽度为头部 1/3 以上，图标仍贴右，便于大触点关闭
+            Expanded(
+                child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => Navigator.pop(context),
+                    child: Container(
+                        height: 44,
+                        alignment: Alignment.centerRight,
+                        child: const Icon(Icons.close, size: 20, color: Color(0xFF999999)))))
           ])),
       const Divider(height: 1, color: Color(0xFFE5E7EB)),
       Expanded(

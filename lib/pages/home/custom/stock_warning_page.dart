@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
+import 'package:flutter_deer/pages/home/custom/sup_file_warn_page.dart';
 import 'package:flutter_deer/pages/home/widgets/approval_reminder_helper.dart';
 
 /// 库存预警页面（对齐 Vue /subs/comPages/stockWarning）
@@ -25,16 +26,23 @@ class _StockWarningPageState extends State<StockWarningPage> {
   Future<void> _loadData() async {
     setState(() => _loading = true);
     try {
-      final res = await request(HttpApi.getIndexTipTotal, {});
+      final res = await request(HttpApi.getIndexTipTotal, <String, dynamic>{});
       final data = res['data'];
       if (data is Map<String, dynamic>) {
         final rawList = (data['tiplist'] as List?) ?? [];
         final tips = <_TipItem>[];
         for (final item in rawList) {
+          if (item is! Map<String, dynamic>) {
+            continue;
+          }
           final title = item['title']?.toString() ?? '';
-          if (title.isEmpty) continue;
-          // 只显示特定类型（对齐 Vue: 商品即将过期/库存不足/库存积压）
-          if (!['商品即将过期', '库存不足', '库存积压'].contains(title)) continue;
+          if (title.isEmpty) {
+            continue;
+          }
+          // 只显示特定类型（对齐 Vue: 商品即将过期/库存不足/库存积压/供应商过期提醒）
+          if (!['商品即将过期', '库存不足', '库存积压', '供应商过期提醒'].contains(title)) {
+            continue;
+          }
 
           String link = '';
           String menuid = '';
@@ -51,8 +59,16 @@ class _StockWarningPageState extends State<StockWarningPage> {
               link = '../data/inventory/inventoryWarn/index?currTab=1';
               menuid = '0213';
               break;
+            case '供应商过期提醒':
+              link = 'supfilewarn';
+              menuid = '';
+              break;
           }
-          tips.add(_TipItem(title: title, link: link, menuid: menuid));
+          // 供应商过期提醒徽标数来自 supfilescount（对齐 Vue）
+          final count = title == '供应商过期提醒'
+              ? (int.tryParse(data['supfilescount']?.toString() ?? '0') ?? 0)
+              : 0;
+          tips.add(_TipItem(title: title, link: link, menuid: menuid, count: count));
         }
         _tips = tips;
       }
@@ -60,7 +76,9 @@ class _StockWarningPageState extends State<StockWarningPage> {
       // 获取待审批数量
       _approvalCount = await ApprovalReminderHelper.fetchCount();
     } catch (_) {}
-    if (mounted) setState(() => _loading = false);
+    if (mounted) {
+      setState(() => _loading = false);
+    }
   }
 
   Future<void> _openApproval() async {
@@ -78,6 +96,14 @@ class _StockWarningPageState extends State<StockWarningPage> {
         break;
       case '商品即将过期':
         Navigator.of(context).pushNamed('/vaildWarn');
+        break;
+      case '供应商过期提醒':
+        // 跳转证照过期提醒列表页（对齐 Vue supFileWarn）
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const SupFileWarnPage(),
+          ),
+        );
         break;
       default:
         ScaffoldMessenger.of(context).showSnackBar(
@@ -113,7 +139,8 @@ class _StockWarningPageState extends State<StockWarningPage> {
                         _buildItem(
                           context,
                           _tips[i].title,
-                          showDot: true,
+                          showDot: _tips[i].count <= 0,
+                          count: _tips[i].count > 0 ? _tips[i].count : null,
                           onTap: () => _navigateTo(_tips[i].title),
                           isLast: i == _tips.length - 1 && _approvalCount == 0,
                         ),
@@ -178,8 +205,9 @@ class _StockWarningPageState extends State<StockWarningPage> {
 }
 
 class _TipItem {
-  const _TipItem({required this.title, required this.link, required this.menuid});
+  const _TipItem({required this.title, required this.link, required this.menuid, this.count = 0});
   final String title;
   final String link;
   final String menuid;
+  final int count;
 }

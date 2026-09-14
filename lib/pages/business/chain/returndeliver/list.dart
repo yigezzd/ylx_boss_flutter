@@ -182,7 +182,7 @@ class _ReturnDeliverListPageState extends State<ReturnDeliverListPage>
 
     return request(HttpApi.psrefundoutFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,

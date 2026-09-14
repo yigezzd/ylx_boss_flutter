@@ -12,10 +12,8 @@ import 'package:flutter_deer/widgets/my_scroll_view.dart';
 import 'package:flutter_deer/widgets/selected_item.dart';
 import 'package:flutter_deer/widgets/text_field_item.dart';
 
-
 /// design/6店铺-账户/index.html#artboard29
 class AddWithdrawalAccountPage extends StatefulWidget {
-
   const AddWithdrawalAccountPage({super.key});
 
   @override
@@ -28,10 +26,11 @@ class _AddWithdrawalAccountPageState extends State<AddWithdrawalAccountPage> {
   String _city = '';
   String _bank = '';
   String _bank1 = '';
-  
+
   @override
   Widget build(BuildContext context) {
-    final TextStyle? style = Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: Dimens.font_sp14);
+    final TextStyle? style =
+        Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: Dimens.font_sp14);
     final List<Widget> children = <Widget>[
       Gaps.vGap5,
       SelectedItem(
@@ -40,7 +39,9 @@ class _AddWithdrawalAccountPageState extends State<AddWithdrawalAccountPage> {
         onTap: () => _showSelectAccountTypeDialog(),
       ),
       Visibility(
-        maintainState: true, /// 是为了保留填写信息，其实就是Offstage，这里只是展示另一种方法。
+        maintainState: true,
+
+        /// 是为了保留填写信息，其实就是Offstage，这里只是展示另一种方法。
         visible: !_isWechat,
         child: Column(
           children: <Widget>[
@@ -71,7 +72,8 @@ class _AddWithdrawalAccountPageState extends State<AddWithdrawalAccountPage> {
               content: _bank.isEmpty ? '选择开户银行' : _bank,
               style: _bank.isEmpty ? style : null,
               onTap: () {
-                NavigatorUtils.pushResult(context, '${AccountRouter.bankSelectPage}?type=0', (Object result) {
+                NavigatorUtils.pushResult(context, '${AccountRouter.bankSelectPage}?type=0',
+                    (Object result) {
                   setState(() {
                     final BankEntity model = result as BankEntity;
                     _bank = model.bankName.nullSafe;
@@ -84,7 +86,8 @@ class _AddWithdrawalAccountPageState extends State<AddWithdrawalAccountPage> {
               content: _bank1.isEmpty ? '选择开户支行' : _bank1,
               style: _bank1.isEmpty ? style : null,
               onTap: () {
-                NavigatorUtils.pushResult(context, '${AccountRouter.bankSelectPage}?type=1', (Object result) {
+                NavigatorUtils.pushResult(context, '${AccountRouter.bankSelectPage}?type=1',
+                    (Object result) {
                   setState(() {
                     final BankEntity model = result as BankEntity;
                     _bank1 = model.bankName.nullSafe;
@@ -105,20 +108,20 @@ class _AddWithdrawalAccountPageState extends State<AddWithdrawalAccountPage> {
     ];
 
     return Scaffold(
-      resizeToAvoidBottomInset: false,
+      // 使用 Scaffold 默认键盘避让（MyScrollView 未配置 keyboardConfig）：
+      // 键盘弹起时 body 收缩，输入框与底部“确定”按钮自动上移，避免被键盘遮挡
       appBar: const MyAppBar(
         title: '添加账号',
       ),
       body: MyScrollView(
-        bottomButton: Padding(
-          padding: const EdgeInsets.only(left: 16.0, right: 16.0, bottom: 8.0),
-          child: MyButton(
-            onPressed: () => NavigatorUtils.goBackWithParams(context, 'add'),
-            text: '确定',
+          bottomButton: Padding(
+            padding: const EdgeInsets.only(left: 16.0, right: 16.0, bottom: 8.0),
+            child: MyButton(
+              onPressed: () => NavigatorUtils.goBackWithParams(context, 'add'),
+              text: '确定',
+            ),
           ),
-        ),
-        children: children
-      ),
+          children: children),
     );
   }
 
@@ -208,6 +211,6 @@ class _AddWithdrawalAccountPageState extends State<AddWithdrawalAccountPage> {
           ),
         );
       },
-    );        
+    );
   }
 }

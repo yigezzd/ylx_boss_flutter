@@ -159,7 +159,7 @@ class _ReturnApplicationListPageState extends State<ReturnApplicationListPage>
 
     return request(HttpApi.psrefundapplyFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,

@@ -145,7 +145,7 @@ class _ReceivingnoteSearchPageState extends State<ReceivingnoteSearchPage>
       // 对齐 Vue：调拨申请单按审核时间倒序、仅已审核、配货完成
       common.addAll({
         'field': 'signtime',
-        'cond': _searchController.text.trim(),
+        'billno': _searchController.text.trim(),
         'signflag': '1',
         'phstatusflag': 1,
       });
@@ -154,7 +154,7 @@ class _ReceivingnoteSearchPageState extends State<ReceivingnoteSearchPage>
       // 对齐 Vue：要货申请单按制单时间倒序、仅已审核（hideoutdateflag/phstatusfilter 为原选择页固定过滤）
       common.addAll({
         'field': 'createtime',
-        'cond': _searchController.text.trim(),
+        'billno': _searchController.text.trim(),
         'signflag': '1',
         'datetype': '1',
         'hideoutdateflag': 1,

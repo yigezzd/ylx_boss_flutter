@@ -171,7 +171,7 @@ class _AllotDeliveryListPageState extends State<AllotDeliveryListPage>
 
     return request(HttpApi.dbstockoutFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,

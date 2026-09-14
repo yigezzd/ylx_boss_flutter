@@ -1371,9 +1371,11 @@ class _PurchaseCgthAddPageState extends State<PurchaseCgthAddPage>
         if (scaleInfo?.type == 'weight') {
           qtyDelta = scaleInfo!.qty ?? 1;
         } else if (scaleInfo?.type == 'amount') {
-          final price = double.tryParse(prod['cgprice']?.toString() ?? '') ??
-              double.tryParse(prod['price']?.toString() ?? '') ??
-              0;
+          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+          final scaleCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+          final price = scaleCgprice != 0
+              ? scaleCgprice
+              : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
           qtyDelta = price > 0 ? (scaleInfo!.amount ?? 0) / price : 1;
         } else {
           qtyDelta = 1;
@@ -1411,7 +1413,11 @@ class _PurchaseCgthAddPageState extends State<PurchaseCgthAddPage>
           }
         }
         if (!duplicated) {
-          final price = double.tryParse((prod['cgprice'] ?? prod['price'] ?? 0).toString()) ?? 0;
+          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+          final scanCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+          final price = scanCgprice != 0
+              ? scanCgprice
+              : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
           final batchno = prod['batchno']?.toString() ?? '';
           final row = _DetailRow();
           row.prodid = prodid;
@@ -1490,17 +1496,23 @@ class _PurchaseCgthAddPageState extends State<PurchaseCgthAddPage>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: raw,
-        initialPrice: double.tryParse(row.priceController.text) ?? 0,
-        initialQty: double.tryParse(row.qtyController.text) ?? 0,
-        initialGiftQty: double.tryParse(row.giftQtyController.text) ?? 0,
-        initialBatch: row.batchno,
-        initialBirthdate: raw['birthdate']?.toString() ?? '',
-        initialValiddate: raw['validdate']?.toString() ?? '',
-        initialRemark: row.remarkController.text,
-        bsid: _storeid,
-        counterid: _counterid,
+      builder: (ctx) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: raw,
+          initialPrice: double.tryParse(row.priceController.text) ?? 0,
+          initialQty: double.tryParse(row.qtyController.text) ?? 0,
+          initialGiftQty: double.tryParse(row.giftQtyController.text) ?? 0,
+          initialBatch: row.batchno,
+          initialBirthdate: raw['birthdate']?.toString() ?? '',
+          initialValiddate: raw['validdate']?.toString() ?? '',
+          initialRemark: row.remarkController.text,
+          bsid: _storeid,
+          counterid: _counterid,
+        ),
       ),
     );
     if (result != null && mounted) {
@@ -1760,8 +1772,11 @@ class _PurchaseCgthAddPageState extends State<PurchaseCgthAddPage>
             final pn = double.tryParse(row.rawData?['packagenum']?.toString() ?? '') ?? 1;
             row.jsQtyController.text = pn > 0 ? (newQty / pn).toStringAsFixed(1) : '0';
             // 同步选择页返回的新价格（用户可能修改了价格，否则统计栏仍按旧价计算）
-            final newPrice =
-                double.tryParse((prod['cgprice'] ?? prod['price'])?.toString() ?? '') ?? 0;
+            // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
+            final syncCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
+            final newPrice = syncCgprice != 0
+                ? syncCgprice
+                : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
             if (newPrice > 0) {
               row.priceController.text = MathUtils.formatDecimal(2, newPrice);
               if (row.rawData != null) row.rawData!['price'] = newPrice;
@@ -1812,18 +1827,24 @@ class _PurchaseCgthAddPageState extends State<PurchaseCgthAddPage>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: raw,
-        initialPrice: double.tryParse(row.priceController.text) ?? 0,
-        initialQty: double.tryParse(row.qtyController.text) ?? 0,
-        initialGiftQty: double.tryParse(row.giftQtyController.text) ?? 0,
-        initialBatch: row.batchno,
-        initialBirthdate: raw['birthdate']?.toString() ?? '',
-        initialValiddate: raw['validdate']?.toString() ?? '',
-        initialRemark: row.remarkController.text,
-        bsid: _storeid,
-        counterid: _counterid,
-        readOnly: _readOnly,
+      builder: (ctx) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: raw,
+          initialPrice: double.tryParse(row.priceController.text) ?? 0,
+          initialQty: double.tryParse(row.qtyController.text) ?? 0,
+          initialGiftQty: double.tryParse(row.giftQtyController.text) ?? 0,
+          initialBatch: row.batchno,
+          initialBirthdate: raw['birthdate']?.toString() ?? '',
+          initialValiddate: raw['validdate']?.toString() ?? '',
+          initialRemark: row.remarkController.text,
+          bsid: _storeid,
+          counterid: _counterid,
+          readOnly: _readOnly,
+        ),
       ),
     );
     if (result != null && mounted) {

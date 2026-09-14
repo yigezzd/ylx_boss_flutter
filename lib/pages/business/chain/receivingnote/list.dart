@@ -177,7 +177,7 @@ class _ReceivingnoteListPageState extends State<ReceivingnoteListPage>
 
     return request(HttpApi.psstockinFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,
@@ -783,33 +783,6 @@ class _ReceivingnoteListPageState extends State<ReceivingnoteListPage>
                           ),
                           child: const BossSvgIcon(
                               svgFile: 'fliter.svg', size: 22, color: Color(0xFF666666)),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      // 新增按钮（对齐 Vue receivingnoteEdit 入口）
-                      GestureDetector(
-                        onTap: () async {
-                          if (!PermissionUtils.checkPermission('013202', showTip: false)) {
-                            Toast.show('你无权新增配送收货单，请在后台修改权限');
-                            return;
-                          }
-                          logAdd();
-                          await Navigator.push<bool>(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const ReceivingnoteEditPage(),
-                            ),
-                          );
-                          _onRefresh();
-                        },
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            border: Border.all(color: const Color(0xFFDEDEDE)),
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: const Icon(Icons.add, size: 24, color: Color(0xFF333333)),
                         ),
                       ),
                     ],

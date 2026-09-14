@@ -182,7 +182,7 @@ class _ReturnTakeDeliveryListPageState extends State<ReturnTakeDeliveryListPage>
 
     return request(HttpApi.psrefundinFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,
@@ -825,33 +825,6 @@ class _ReturnTakeDeliveryListPageState extends State<ReturnTakeDeliveryListPage>
                           ),
                           child: const BossSvgIcon(
                               svgFile: 'fliter.svg', size: 22, color: Color(0xFF666666)),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      // 新增按钮（对齐 Vue returentakeDeliveryEdit 入口，权限 013502）
-                      GestureDetector(
-                        onTap: () async {
-                          if (!PermissionUtils.checkPermission('013502', showTip: false)) {
-                            Toast.show('你无权新增配退收货单，请在后台修改权限');
-                            return;
-                          }
-                          logAdd();
-                          await Navigator.push<bool>(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const ReturnTakeDeliveryEditPage(),
-                            ),
-                          );
-                          _onRefresh();
-                        },
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            border: Border.all(color: const Color(0xFFDEDEDE)),
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: const Icon(Icons.add, size: 24, color: Color(0xFF333333)),
                         ),
                       ),
                     ],

@@ -65,7 +65,7 @@ class _MainHomePageState extends State<MainHomePage> {
   List<String> _stockTips = [];
 
   /// `false` 隐藏单据审批提醒 + 消息提醒，`true` 显示
-  static const bool _showReminders = false;
+  static const bool _showReminders = true;
   // 销售排行榜
   List<Map<String, dynamic>> _saleRankList = [];
   String _saleRankType = 'SaleType'; // SaleType=分类销售榜 SaleProd=单品销售榜

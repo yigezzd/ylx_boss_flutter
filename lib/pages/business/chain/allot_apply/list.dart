@@ -185,7 +185,7 @@ class _AllotApplyListPageState extends State<AllotApplyListPage>
 
     return request(HttpApi.dborderFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,

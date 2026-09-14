@@ -58,6 +58,10 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
   String? _outcountertype; // 退货仓库类型（对齐 Vue countertype，用于双配送中心仓库类型校验）
   int? _outStoretype; // 退货门店机构类型（配送中心=3，对齐 Vue storetype）
   int? _inStoretype; // 配送中心机构类型（配送中心=3，对齐 Vue storetype）
+  String? _outhandlerid; // 发货经手人
+  String? _outhandlername;
+  String? _inhandlerid; // 收货经手人
+  String? _inhandlername;
   String? _outstocksaleflag; // 退货仓库库存控制（对齐 Vue @confirm：e.stocksaleflag）
   String? _tpbillno; // 原单号（对齐 Vue tpbillno = res.billno）
   String? _yhbillid; // 源单id（对齐 Vue yhbillid）
@@ -266,6 +270,11 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
           _tpbillno = data['tpbillno']?.toString();
           _yhbillid = data['yhbillid']?.toString();
           _yhremark = data['yhremark']?.toString();
+          // 对齐 Vue form fields：发货/收货经手人
+          _outhandlerid = data['outhandlerid']?.toString();
+          _outhandlername = data['outhandlername']?.toString();
+          _inhandlerid = data['inhandlerid']?.toString();
+          _inhandlername = data['inhandlername']?.toString();
           _psuserid = data['psuserid']?.toString();
           _psname = data['psname']?.toString();
           _refbilltype = int.tryParse(data['refbilltype']?.toString() ?? '') ?? 1;
@@ -381,6 +390,11 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
     params['tpbillno'] = _tpbillno ?? '';
     params['yhbillid'] = _yhbillid ?? '';
     params['yhremark'] = _yhremark ?? '';
+    // 对齐 Vue form fields：发货/收货经手人
+    params['outhandlerid'] = _outhandlerid ?? '';
+    params['outhandlername'] = _outhandlername ?? '';
+    params['inhandlerid'] = _inhandlerid ?? '';
+    params['inhandlername'] = _inhandlername ?? '';
     params['psuserid'] = _psuserid ?? '';
     params['psname'] = _psname ?? '';
     params['refbilltype'] = _refbilltype;
@@ -392,8 +406,14 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
 
     request(HttpApi.psrefundoutSave, params).then((result) {
       if (!mounted) return;
-      Toast.show('保存成功');
       final retData = result['data'];
+      // 保存后进入多级审批流程时，不提示保存成功和接口返回信息
+      final bool enterApproval = withSign &&
+          retData is Map<String, dynamic> &&
+          _parseReviewList(retData['reviewFlowUsers']).isNotEmpty;
+      if (!enterApproval) {
+        Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
         if (isNew) {
@@ -454,7 +474,7 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
     setState(() => _submitAction = _ReturnDeliverAction.sign);
     request(HttpApi.psrefundoutSign, params).then((result) {
       if (!mounted) return;
-      Toast.show('审核成功');
+      Toast.show(result['retmsg']?.toString() ?? '审核成功');
       _loadDetail(_billData);
     }).whenComplete(() {
       if (mounted) setState(() => _submitAction = _ReturnDeliverAction.none);
@@ -513,9 +533,19 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
     if (confirm != true) return;
 
     // 对齐 Vue：query.value.reviewsignflag = 2 → save(1)
-    // 撤回仅需审核权限 013405，不要求保存权限，故跳过 _submit 内的保存权限校验
-    _billData!['reviewsignflag'] = 2;
-    _submit(withSign: true, skipSavePermissionCheck: true);
+    // 直接调 sign API 绕过保存流程，避免 _doSignAfterSave 误弹审批弹窗
+    setState(() => _submitAction = _ReturnDeliverAction.withdraw);
+    final params = Map<String, dynamic>.from(_billData!);
+    params['reviewsignflag'] = 2;
+    params['reviewremark'] = '';
+    params['signflag'] = 1;
+    request(HttpApi.psrefundoutSign, params).then((result) {
+      if (!mounted) return;
+      Toast.show(result['retmsg']?.toString() ?? '撤回成功');
+      _loadDetail(_billData);
+    }).whenComplete(() {
+      if (mounted) setState(() => _submitAction = _ReturnDeliverAction.none);
+    });
   }
 
   /// 删除单据（对齐 Vue delBill：psrefundout/delBill {billid}）
@@ -665,6 +695,65 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
       });
       // 对齐 Vue @confirm：updateCgPrice 同步价格
       await _handleStoreChangePrice('insid', oldId, oldName, oldStoretype);
+    }
+  }
+
+  // =================== 经手人选择（对齐 Vue handler-form-item） ===================
+  /// 选择发货经手人（对齐 Vue mergeData: { sids: form.outsid }）
+  Future<void> _selectOutHandler() async {
+    if ((_outsid ?? '').isEmpty) {
+      Toast.show('请先选择退货门店');
+      return;
+    }
+    final result = await CommonSelectSheet.show(
+      context,
+      title: '选择发货经手人',
+      searchHint: '输入经手人名称/编码',
+      initialSelectedId: _outhandlerid,
+      idField: 'userid',
+      fetchData: (searchText, page) => request(HttpApi.sysUserList, {
+        'cond': searchText,
+        'sids': [_outsid],
+      }).then((result) {
+        final data = result['data'];
+        return data is Map<String, dynamic> ? data : null;
+      }),
+      mapResult: (item) => item,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _outhandlerid = result['userid']?.toString() ?? '';
+        _outhandlername = result['name']?.toString() ?? '';
+      });
+    }
+  }
+
+  /// 选择收货经手人（对齐 Vue mergeData: { sids: form.insid }）
+  Future<void> _selectInHandler() async {
+    if ((_insid ?? '').isEmpty) {
+      Toast.show('请先选择配送中心');
+      return;
+    }
+    final result = await CommonSelectSheet.show(
+      context,
+      title: '选择收货经手人',
+      searchHint: '输入经手人名称/编码',
+      initialSelectedId: _inhandlerid,
+      idField: 'userid',
+      fetchData: (searchText, page) => request(HttpApi.sysUserList, {
+        'cond': searchText,
+        'sids': [_insid],
+      }).then((result) {
+        final data = result['data'];
+        return data is Map<String, dynamic> ? data : null;
+      }),
+      mapResult: (item) => item,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _inhandlerid = result['userid']?.toString() ?? '';
+        _inhandlername = result['name']?.toString() ?? '';
+      });
     }
   }
 
@@ -1121,7 +1210,15 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
       Toast.show('必须选择配送中心仓库后才能选择商品！');
       return;
     }
-    final result = await Navigator.push<List<Map<String, dynamic>>>(
+    final result = await _openSelectProductPage();
+    if (result != null && mounted) {
+      _applySelectedProducts(result);
+    }
+  }
+
+  /// 打开选择商品页（扫码命中多条商品时以 initialKeyword 自动粘贴条码搜索）
+  Future<List<Map<String, dynamic>>?> _openSelectProductPage({String? keyword}) {
+    return Navigator.push<List<Map<String, dynamic>>>(
       context,
       MaterialPageRoute(
         builder: (_) => SelectProductPage(
@@ -1157,37 +1254,55 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
             'instockqty',
             'psamt',
           ],
+          // 带入扫描条码：选择页首次加载即按该条码搜索，展示全部命中商品供用户挑选
+          initialKeyword: keyword,
         ),
       ),
     );
-    if (result != null && mounted) {
-      setState(() {
-        for (final row in _items) {
-          row.dispose();
-        }
-        _items.clear();
-        for (final prod in result) {
-          final c = Map<String, dynamic>.from(prod);
-          // 对齐 Vue productConfirm：price = f2(lspsprice)；stockqty = outstockqty（原值）
-          c['price'] =
-              MathUtils.formatDecimal(2, double.tryParse(c['lspsprice']?.toString() ?? '0') ?? 0);
-          c['stockqty'] = c['outstockqty'];
-          _applyLoadedData(c);
-          _applyWriteData(c);
-          final row = _DetailRow()
-            ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
-            ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
-            ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
-            ..qtyController.text = c['qty']?.toString() ?? '0'
-            ..priceController.text = c['price']?.toString() ?? '0'
-            ..batchno = c['batchno']?.toString() ?? ''
-            ..batchController.text = c['batchno']?.toString() ?? ''
-            ..rawData = c;
-          row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
-          row.amtController.text = c['amt']?.toString() ?? '';
-          _items.add(row);
-        }
-      });
+  }
+
+  /// 选择页确认后整体回填明细（对齐 Vue onSelectProduct：选择页已选区含当前明细）
+  void _applySelectedProducts(List<Map<String, dynamic>> result) {
+    setState(() {
+      for (final row in _items) {
+        row.dispose();
+      }
+      _items.clear();
+      for (final prod in result) {
+        final c = Map<String, dynamic>.from(prod);
+        // 对齐 Vue productConfirm：price = f2(lspsprice)；stockqty = outstockqty（原值）
+        c['price'] =
+            MathUtils.formatDecimal(2, double.tryParse(c['lspsprice']?.toString() ?? '0') ?? 0);
+        c['stockqty'] = c['outstockqty'];
+        _applyLoadedData(c);
+        _applyWriteData(c);
+        final row = _DetailRow()
+          ..prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? ''
+          ..barcode = c['barcode']?.toString() ?? c['selfbarcode']?.toString() ?? ''
+          ..nameController.text = c['productname']?.toString() ?? c['name']?.toString() ?? ''
+          ..qtyController.text = c['qty']?.toString() ?? '0'
+          ..priceController.text = c['price']?.toString() ?? '0'
+          ..batchno = c['batchno']?.toString() ?? ''
+          ..batchController.text = c['batchno']?.toString() ?? ''
+          ..rawData = c;
+        row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
+        row.amtController.text = c['amt']?.toString() ?? '';
+        _items.add(row);
+      }
+    });
+  }
+
+  /// 扫描条码命中多条商品时进入选择商品页（避免误取第一条），
+  /// 用户挑选确认后焦点交还扫码输入框，便于 PDA 连续录入
+  Future<void> _pickFromMultiple(String code, {FocusNode? returnFocusNode}) async {
+    final result = await _openSelectProductPage(keyword: code);
+    if (!mounted) return;
+    if (result != null) {
+      _applySelectedProducts(result);
+    }
+    // 无论确认/取消，均将焦点交还扫码输入框，便于 PDA 连续录入
+    if (returnFocusNode != null && mounted) {
+      returnFocusNode.requestFocus();
     }
   }
 
@@ -1241,6 +1356,12 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
         Toast.show('未查询到该商品');
         return;
       }
+      if (list.length > 1) {
+        // 同一(秤)条码命中多条商品时无法自动确定目标：
+        // 进入选择商品页并将条码粘贴到搜索框自动搜索，供用户挑选
+        _pickFromMultiple(searchCode, returnFocusNode: returnFocusNode);
+        return;
+      }
       // 对齐 Vue scanFn：只处理第一条
       final prod = list.first as Map<String, dynamic>;
       final c = Map<String, dynamic>.from(prod);
@@ -1285,20 +1406,26 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: data,
-        initialQty: qty,
-        initialPrice: price,
-        initialAmt: currentAmt,
-        initialRemark: data['remark']?.toString() ?? '',
-        initialBatch: data['batchno']?.toString() ?? '',
-        initialBirthdate: data['birthdate']?.toString() ?? '',
-        initialValiddate: data['validdate']?.toString() ?? '',
-        insid: _insid ?? '',
-        bsid: _outsid ?? '',
-        counterid: _outcounterid ?? '',
-        memorytype: _incountertype ?? '',
-        priceEditable: _priceEditEnabled(),
+      builder: (_) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免数量输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: data,
+          initialQty: qty,
+          initialPrice: price,
+          initialAmt: currentAmt,
+          initialRemark: data['remark']?.toString() ?? '',
+          initialBatch: data['batchno']?.toString() ?? '',
+          initialBirthdate: data['birthdate']?.toString() ?? '',
+          initialValiddate: data['validdate']?.toString() ?? '',
+          insid: _insid ?? '',
+          bsid: _outsid ?? '',
+          counterid: _outcounterid ?? '',
+          memorytype: _incountertype ?? '',
+          priceEditable: _priceEditEnabled(),
+        ),
       ),
     ).then((result) {
       if (result == null || !mounted) return;
@@ -1624,9 +1751,19 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
                     child: _readOnly ? _buildBillInfoReadonly() : _buildBillInfoEditable()))),
         if (!_isSigned && !_scanSettings.showInfraredInput)
           const SliverToBoxAdapter(child: SizedBox(height: 8)),
-        SliverToBoxAdapter(
-            child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 0, 8, 0), child: _buildProductHeader())),
+        // 粘性表头：扫描框 + 商品明细标题栏（固定不随商品列表滚动）
+        PinnedHeaderSliver(
+            child: ColoredBox(
+                color: const Color(0xFFF5F5F5),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  if (_showScanInput) ...[
+                    Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 0), child: _buildScanInput()),
+                    const SizedBox(height: 8),
+                  ],
+                  Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 0), child: _buildProductHeader())
+                ]))),
         if (_items.isNotEmpty)
           SliverList.builder(
               itemCount: _items.length,
@@ -1660,6 +1797,51 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
       ])),
       if (!keyboardVisible) _buildBottomBar(),
     ]);
+  }
+
+  /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入）
+  bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
+
+  // =================== 条码扫描输入框（对齐 allot_apply） ===================
+  Widget _buildScanInput() {
+    return Container(
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5)),
+        child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Row(children: [
+              Expanded(
+                  child: TextField(
+                controller: _scanController,
+                focusNode: _scanFocusNode,
+                autofocus: true,
+                showCursor: true,
+                keyboardType: TextInputType.none,
+                enableInteractiveSelection: false,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
+                textInputAction: TextInputAction.search,
+                decoration: const InputDecoration(
+                  hintText: '请将扫描枪对准商品条码',
+                  hintStyle: TextStyle(fontSize: 13, color: Color(0xFFD1D5DB)),
+                  border: OutlineInputBorder(
+                    borderSide: BorderSide(color: Color(0xFFE5E7EB)),
+                    borderRadius: BorderRadius.all(Radius.circular(8)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: Color(0xFFE5E7EB)),
+                    borderRadius: BorderRadius.all(Radius.circular(8)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderSide: BorderSide(color: Color(0xFF006EFF)),
+                    borderRadius: BorderRadius.all(Radius.circular(8)),
+                  ),
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              )),
+            ])));
   }
 
   /// 商品明细头部（附件/删除/扫描/新增，对齐 Vue 商品明细 tm-sheet，无列头）
@@ -1852,30 +2034,68 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildReadonlyField(label: '原单号', value: _tpbillno ?? ''),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      _buildReadonlyField(label: '发货经手人', value: _outhandlername ?? ''),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      _buildReadonlyField(label: '收货经手人', value: _inhandlername ?? ''),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildReadonlyField(label: '送货员', value: _psname ?? ''),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildReadonlyField(label: '备注', value: _remarkController.text),
     ]);
   }
 
-  /// 可编辑单据信息（对齐 Vue：退货门店→退货仓库→配送中心→配送中心仓库→原单号→送货员→备注）
+  /// 可编辑单据信息（对齐 Vue：退货门店→退货仓库→配送中心→配送中心仓库→原单号→发货经手人→收货经手人→送货员→备注）
   Widget _buildBillInfoEditable() {
+    // 左侧标签文字宽度在原 80 基础上增加 1/3（80*4/3≈107），避免"配送中心仓库"等长标签折行
+    const double labelWidth = 107;
     return Column(children: [
       SelectFieldItem(
-          label: '退货门店', required: true, value: _outstorename ?? '', onTap: _selectOutStore),
+          label: '退货门店',
+          labelWidth: labelWidth,
+          required: true,
+          value: _outstorename ?? '',
+          onTap: _selectOutStore),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
-          label: '退货仓库', required: true, value: _outcountername ?? '', onTap: _selectOutCounter),
+          label: '退货仓库',
+          labelWidth: labelWidth,
+          required: true,
+          value: _outcountername ?? '',
+          onTap: _selectOutCounter),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
-          label: '配送中心', required: true, value: _instorename ?? '', onTap: _selectInStore),
+          label: '配送中心',
+          labelWidth: labelWidth,
+          required: true,
+          value: _instorename ?? '',
+          onTap: _selectInStore),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
-          label: '配送中心仓库', required: true, value: _incountername ?? '', onTap: _selectInCounter),
+          label: '配送中心仓库',
+          labelWidth: labelWidth,
+          required: true,
+          value: _incountername ?? '',
+          onTap: _selectInCounter),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
-      SelectFieldItem(label: '原单号', value: _tpbillno ?? '', onTap: _openRefbilltype),
+      SelectFieldItem(
+          label: '原单号', labelWidth: labelWidth, value: _tpbillno ?? '', onTap: _openRefbilltype),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
-      SelectFieldItem(label: '送货员', value: _psname ?? '', onTap: _selectPsUser),
+      // 对齐 Vue handler-form-item：发货经手人（依赖退货门店，未选时点击提示）
+      SelectFieldItem(
+          label: '发货经手人',
+          labelWidth: labelWidth,
+          value: _outhandlername ?? '',
+          onTap: _selectOutHandler),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      // 对齐 Vue handler-form-item：收货经手人（依赖配送中心，未选时点击提示）
+      SelectFieldItem(
+          label: '收货经手人',
+          labelWidth: labelWidth,
+          value: _inhandlername ?? '',
+          onTap: _selectInHandler),
+      const Divider(height: 1, color: Color(0xFFF3F4F6)),
+      SelectFieldItem(
+          label: '送货员', labelWidth: labelWidth, value: _psname ?? '', onTap: _selectPsUser),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       _buildField(controller: _remarkController, label: '备注', hint: '请输入备注信息'),
     ]);
@@ -2170,7 +2390,8 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         child: Row(children: [
           SizedBox(
-              width: 80,
+              // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+              width: 107,
               child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280)))),
           Expanded(
               child: Text(value.isNotEmpty ? value : '-',
@@ -2191,7 +2412,8 @@ class _ReturnDeliverEditPageState extends State<ReturnDeliverEditPage>
       child: Row(
         children: [
           SizedBox(
-            width: 80,
+            // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
+            width: 107,
             child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF374151))),
           ),
           Expanded(
@@ -2288,20 +2510,26 @@ class _DetailItemState extends State<_DetailItem> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: data,
-        initialQty: qty,
-        initialPrice: price,
-        initialAmt: currentAmt,
-        initialBatch: widget.row.batchController.text,
-        initialBirthdate: data['birthdate']?.toString() ?? '',
-        initialValiddate: data['validdate']?.toString() ?? '',
-        initialRemark: data['remark']?.toString() ?? '',
-        insid: widget.insid,
-        bsid: widget.bsid,
-        counterid: widget.counterid,
-        memorytype: widget.memorytype,
-        priceEditable: widget.priceEditable,
+      builder: (_) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免数量输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: data,
+          initialQty: qty,
+          initialPrice: price,
+          initialAmt: currentAmt,
+          initialBatch: widget.row.batchController.text,
+          initialBirthdate: data['birthdate']?.toString() ?? '',
+          initialValiddate: data['validdate']?.toString() ?? '',
+          initialRemark: data['remark']?.toString() ?? '',
+          insid: widget.insid,
+          bsid: widget.bsid,
+          counterid: widget.counterid,
+          memorytype: widget.memorytype,
+          priceEditable: widget.priceEditable,
+        ),
       ),
     ).then((result) {
       if (result == null) return;
@@ -2804,6 +3032,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
           Expanded(
               child: TextField(
                   controller: _batchCtrl,
+                  // 商品批次只能选择，不支持手动录入
+                  readOnly: true,
                   keyboardType: TextInputType.text,
                   textAlign: TextAlign.right,
                   style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
@@ -2811,49 +3041,53 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                       border: InputBorder.none,
                       isDense: true,
                       contentPadding: EdgeInsets.zero,
-                      hintStyle: TextStyle(fontSize: 14, color: Color(0xFFD1D5DB))))),
+                      hintStyle: TextStyle(fontSize: 14, color: Color(0xFFD1D5DB))),
+                  onTap: _pickBatch)),
           const SizedBox(width: 4),
           GestureDetector(
-              onTap: () async {
-                final productid = widget.productData['productid']?.toString() ??
-                    widget.productData['prodid']?.toString() ??
-                    '';
-                if (productid.isEmpty) {
-                  Toast.show('商品信息异常');
-                  return;
-                }
-                FocusScope.of(context).unfocus();
-                final result = await showModalBottomSheet<Map<String, dynamic>>(
-                    context: context,
-                    isScrollControlled: true,
-                    backgroundColor: Colors.transparent,
-                    builder: (_) => SelectBatchSheet(
-                        productid: productid,
-                        bsid: widget.bsid,
-                        counterid: widget.counterid,
-                        // 对齐后台：配退发货批次查询不带 costflag
-                        costflag: false,
-                        // 对齐 Vue select-batch mergeData：{ productid, insid, bsid, pspriceflag: 1, counterid }
-                        mergData: {
-                          'insid': widget.insid,
-                          'pspriceflag': 1,
-                        },
-                        initialBatchNo: _batchCtrl.text));
-                if (result != null && mounted) {
-                  setState(() {
-                    _batchCtrl.text = result['batchno']?.toString() ?? '';
-                    final bd = _formatBatchDate(result['birthdate']);
-                    _birthdateCtrl.text = bd;
-                    final vd = _formatBatchDate(result['validdate']);
-                    _validdateCtrl.text = vd.isEmpty ? bd : vd;
-                    // 对齐 Vue handleBatchConfirm：stockqty = formatDecimal(1, data.stockqty)
-                    _stockqty = MathUtils.formatDecimal(
-                        1, double.tryParse(result['stockqty']?.toString() ?? '') ?? 0);
-                  });
-                }
-              },
+              onTap: _pickBatch,
               child: const Icon(Icons.chevron_right, size: 20, color: Color(0xFFD1D5DB)))
         ]));
+  }
+
+  /// 打开批次选择器（商品批次只能选择）
+  Future<void> _pickBatch() async {
+    final productid = widget.productData['productid']?.toString() ??
+        widget.productData['prodid']?.toString() ??
+        '';
+    if (productid.isEmpty) {
+      Toast.show('商品信息异常');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (_) => SelectBatchSheet(
+            productid: productid,
+            bsid: widget.bsid,
+            counterid: widget.counterid,
+            // 对齐后台：配退发货批次查询不带 costflag
+            costflag: false,
+            // 对齐 Vue select-batch mergeData：{ productid, insid, bsid, pspriceflag: 1, counterid }
+            mergData: {
+              'insid': widget.insid,
+              'pspriceflag': 1,
+            },
+            initialBatchNo: _batchCtrl.text));
+    if (result != null && mounted) {
+      setState(() {
+        _batchCtrl.text = result['batchno']?.toString() ?? '';
+        final bd = _formatBatchDate(result['birthdate']);
+        _birthdateCtrl.text = bd;
+        final vd = _formatBatchDate(result['validdate']);
+        _validdateCtrl.text = vd.isEmpty ? bd : vd;
+        // 对齐 Vue handleBatchConfirm：stockqty = formatDecimal(1, data.stockqty)
+        _stockqty =
+            MathUtils.formatDecimal(1, double.tryParse(result['stockqty']?.toString() ?? '') ?? 0);
+      });
+    }
   }
 
   Widget _buildDateField({required String label, required TextEditingController ctrl}) {
@@ -3288,7 +3522,10 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           // 审批意见
           Row(
             children: [
-              const Text('*审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              const Text.rich(TextSpan(children: [
+                TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+                TextSpan(text: '审批意见：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+              ])),
               const SizedBox(width: 16),
               GestureDetector(
                 onTap: () => setState(() => _flag = 1),
@@ -3311,10 +3548,13 @@ class _ApprovalDialogState extends State<_ApprovalDialog> {
           ),
           const SizedBox(height: 20),
           // 备注/驳回原因
-          Text(
-            _flag == 1 ? '备注信息：' : '*驳回原因：',
-            style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
-          ),
+          if (_flag == 1)
+            const Text('备注信息：', style: TextStyle(fontSize: 14, color: Color(0xFF333333)))
+          else
+            const Text.rich(TextSpan(children: [
+              TextSpan(text: '*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A))),
+              TextSpan(text: '驳回原因：', style: TextStyle(fontSize: 14, color: Color(0xFF333333))),
+            ])),
           const SizedBox(height: 8),
           Stack(children: [
             TextField(
@@ -3424,17 +3664,20 @@ class _ApprovalLogSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(children: [
       Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            const Expanded(
-                child: Center(
-                    child:
-                        Text('审批日志', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)))),
-            GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: const Padding(
-                    padding: EdgeInsets.all(4),
-                    child: Icon(Icons.close, size: 20, color: Color(0xFF999999))))
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          child: Row(children: [
+            // 左侧对称占位（与右侧关闭热区等宽），保证标题居中
+            const Spacer(),
+            const Text('审批日志', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            // 关闭热区：宽度为头部 1/3 以上，图标仍贴右，便于大触点关闭
+            Expanded(
+                child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => Navigator.pop(context),
+                    child: Container(
+                        height: 44,
+                        alignment: Alignment.centerRight,
+                        child: const Icon(Icons.close, size: 20, color: Color(0xFF999999)))))
           ])),
       const Divider(height: 1, color: Color(0xFFE5E7EB)),
       Expanded(

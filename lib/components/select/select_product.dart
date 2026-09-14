@@ -36,6 +36,7 @@ class SelectProductPage extends StatefulWidget {
     this.amtRecalcQty = true,
     this.amtQtyDecimals = 2,
     this.showSelectedCount = false,
+    this.selectMax,
   });
   final int? storeid;
   final String? counterid;
@@ -89,9 +90,13 @@ class SelectProductPage extends StatefulWidget {
   /// 反算数量的保留小数位（对齐各单据 formatDecimal：instore=1，其余页面=2）
   final int amtQtyDecimals;
 
-  /// 底部栏是否显示"已选X件 + 合计数量 + 合计金额"统计（连锁模块单据使用；
-  /// 默认 false 保持原有"数量 + 合计"样式）
+  /// 历史参数（连锁模块单据曾用于区分"已选X件"统计样式）。
+  /// 现底部栏统一为两列"数量 / 合计"（label 在上、value 在下），该参数仅作兼容保留不再影响布局
   final bool showSelectedCount;
+
+  /// 最大可选数量上限（复选框模式下生效，0 或 null 表示不限制）
+  /// 对齐小程序 selectMax（兑奖换购等场景传 5）
+  final int? selectMax;
 
   @override
   State<SelectProductPage> createState() => _SelectProductPageState();
@@ -129,7 +134,8 @@ class _SelectProductPageState extends State<SelectProductPage> {
   String get _totalQtyText => MathUtils.formatDecimal(1, _totalQtyValue);
 
   /// 已选总金额：Σ(单价 × 数量)，单价取值对齐 _getPrice
-  /// （cgpriceflag 取 cgprice||price，pspriceflag 取 lspsprice||price，否则 sellprice||price）
+  /// （cgpriceflag 取 cgprice||price，cgprice 为空或为 0 时回退档案进价 price，
+  /// pspriceflag 取 lspsprice||price，否则 sellprice||price）
   /// formatDecimal(3) 对齐 Vue getAmt
   String get _totalAmtText {
     final cgpriceflag = widget.mergData?['cgpriceflag']?.toString() == '1';
@@ -139,7 +145,7 @@ class _SelectProductPageState extends State<SelectProductPage> {
       final qty = double.tryParse(item['qty']?.toString() ?? '0') ?? 0;
       String priceText;
       if (cgpriceflag) {
-        priceText = item['cgprice']?.toString() ?? item['price']?.toString() ?? '0';
+        priceText = _cgPriceText(item, fallback: '0');
       } else if (pspriceflag) {
         priceText = item['lspsprice']?.toString() ?? item['price']?.toString() ?? '0';
       } else {
@@ -416,9 +422,7 @@ class _SelectProductPageState extends State<SelectProductPage> {
         // 同步重算 amt（对齐 _confirm 补全逻辑）
         final cgpriceflag = widget.mergData?['cgpriceflag']?.toString() == '1';
         final priceText = cgpriceflag
-            ? (_selectedItems[idx]['cgprice']?.toString() ??
-                _selectedItems[idx]['price']?.toString() ??
-                '0')
+            ? _cgPriceText(_selectedItems[idx], fallback: '0')
             : (_selectedItems[idx]['sellprice']?.toString() ??
                 _selectedItems[idx]['price']?.toString() ??
                 '0');
@@ -448,6 +452,13 @@ class _SelectProductPageState extends State<SelectProductPage> {
   void _toggleSelect(Map<String, dynamic> item) {
     final idx = _findSelectedIndex(item);
     if (idx < 0) {
+      // 勾选上限校验（对齐小程序 selectMax）：达到上限时阻止勾选
+      if (widget.selectMax != null &&
+          widget.selectMax! > 0 &&
+          _selectedItems.length >= widget.selectMax!) {
+        Toast.show('最多支持${widget.selectMax}个兑换商品');
+        return;
+      }
       // 未选中 → 加入（同步写入 price 和 amt，对齐 _confirm 补全逻辑）
       final result = Map<String, dynamic>.from(item);
       result['qty'] = 1;
@@ -508,11 +519,24 @@ class _SelectProductPageState extends State<SelectProductPage> {
     return item['stock']?.toString() ?? item['stockqty']?.toString() ?? '0';
   }
 
+  /// 采购价文本（对齐小程序 selectProduct.vue 真值链 item.cgprice || item.price）：
+  /// cgprice 为空、不可解析或为 0 时回退档案进价 price；两者均无效时返回 fallback
+  String _cgPriceText(Map<String, dynamic> item, {String fallback = '0.00'}) {
+    for (final key in const ['cgprice', 'price']) {
+      final raw = item[key];
+      if (raw == null) continue;
+      final value = double.tryParse(raw.toString());
+      if (value != null && value != 0) return raw.toString();
+    }
+    return fallback;
+  }
+
   String _getPrice(Map<String, dynamic> item) {
     // 对齐 lxAss: cgpriceflag 模式下取 cgprice，否则取 sellprice（默认）
     final cgpriceflag = widget.mergData?['cgpriceflag']?.toString() == '1';
     if (cgpriceflag) {
-      return item['cgprice']?.toString() ?? item['price']?.toString() ?? '0.00';
+      // 对齐小程序：cgprice 为空或为 0 时回退档案进价 price
+      return _cgPriceText(item);
     }
     // 配送价模式（连锁模块单据：pspriceflag=1 时取 lspsprice 配送价）
     final pspriceflag = widget.mergData?['pspriceflag']?.toString() == '1';
@@ -3172,7 +3196,7 @@ class _SelectProductPageState extends State<SelectProductPage> {
       if (!recalcAllAmt && manual) continue;
       final qty = double.tryParse(item['qty']?.toString() ?? '0') ?? 0;
       final priceText = cgpriceflag
-          ? (item['cgprice']?.toString() ?? item['price']?.toString() ?? '0')
+          ? _cgPriceText(item, fallback: '0')
           : (item['sellprice']?.toString() ?? item['price']?.toString() ?? '0');
       final price = double.tryParse(priceText) ?? 0;
       item['amt'] = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
@@ -3508,46 +3532,14 @@ class _SelectProductPageState extends State<SelectProductPage> {
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: _showSelectedList,
-                child: widget.showSelectedCount
-                    ? Row(
-                        children: [
-                          // 已选件数（连锁模块单据：已选X件 + 合计数量 + 合计金额）
-                          Text(
-                            '已选${_selectedItems.length}件',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              color: _primaryColor,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          // 统计列：宽屏固定 170，窄屏自动收缩避免溢出警告线
-                          Flexible(
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 170),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  _buildInlineStat('合计数量', _totalQtyText),
-                                  const SizedBox(height: 2),
-                                  _buildInlineStat('合计金额', '¥$_totalAmtText', isAmt: true),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      )
-                    : Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(child: _buildTotalStatItem('数量', _totalQtyText)),
-                          Expanded(
-                              child: _buildTotalStatItem('合计', '¥$_totalAmtText', isAmt: true)),
-                        ],
-                      ),
+                // 统计区两列：label 在上、value 在下（数量 + 合计，金额红色强调）
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: _buildTotalStatItem('数量', _totalQtyText)),
+                    Expanded(child: _buildTotalStatItem('合计', '¥$_totalAmtText', isAmt: true)),
+                  ],
+                ),
               ),
             ),
           SizedBox(
@@ -3594,30 +3586,6 @@ class _SelectProductPageState extends State<SelectProductPage> {
             fontWeight: FontWeight.w600,
             height: 1.4,
             color: isAmt ? const Color(0xFFFF4D4F) : const Color(0xFF111827),
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// 行内统计项（连锁模式底部栏：label 与 value 同行，供合计数量/合计金额上下两行排布）
-  Widget _buildInlineStat(String label, String value, {bool isAmt = false}) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280), height: 1.4)),
-        const SizedBox(width: 4),
-        Flexible(
-          child: Text(
-            value,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              height: 1.4,
-              color: isAmt ? const Color(0xFFFF4D4F) : const Color(0xFF111827),
-            ),
           ),
         ),
       ],

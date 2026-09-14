@@ -103,7 +103,7 @@ class _WmsLaunchSearchPageState extends State<WmsLaunchSearchPage> {
 
     final params = <String, dynamic>{
       'is_page': 1,
-      'field': _isBillMode ? 'createtime' : '',
+      'field': _isBillMode ? 'createtime' : 'billno',
       'type': 'desc',
       'page': _page,
       'pagesize': _pageSize,

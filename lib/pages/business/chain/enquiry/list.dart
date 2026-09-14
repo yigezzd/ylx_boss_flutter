@@ -49,9 +49,8 @@ class _EnquiryListPageState extends State<EnquiryListPage>
   Timer? _debounce;
 
   // ── 筛选参数（对齐 Vue params） ──
-  String _storeName = '';
+  // 当前登录机构（固定用于 sids 过滤：列表页不提供机构切换，与连锁其他页面保持一致）
   List<int> _sids = [];
-  String _activeStoreId = '';
 
   String _filterCreateid = '';
   String _filterCreatename = '';
@@ -76,7 +75,7 @@ class _EnquiryListPageState extends State<EnquiryListPage>
     _endDate = now;
     _startDate = now.subtract(const Duration(days: 30));
 
-    // 默认机构
+    // 固定按当前登录机构过滤（列表页不提供机构切换）
     try {
       final String storeStr = SpUtil.getString(Constant.store) ?? '';
       if (storeStr.isNotEmpty) {
@@ -84,8 +83,6 @@ class _EnquiryListPageState extends State<EnquiryListPage>
         final storeId = storeMap['id']?.toString() ?? '';
         if (storeId.isNotEmpty) {
           _sids = [int.tryParse(storeId) ?? 0];
-          _activeStoreId = storeId;
-          _storeName = storeMap['name']?.toString() ?? '';
         }
       }
     } catch (_) {}
@@ -175,7 +172,7 @@ class _EnquiryListPageState extends State<EnquiryListPage>
 
     return request(HttpApi.yhorderFindList, {
       'is_page': 1,
-      'cond': _searchController.text.trim(),
+      'billno': _searchController.text.trim(),
       'field': 'createtime',
       'type': 'desc',
       'page': _page,
@@ -215,27 +212,6 @@ class _EnquiryListPageState extends State<EnquiryListPage>
     _hasMore = true;
     await _refreshReviewConfig();
     await _loadData();
-  }
-
-  // ── 机构选择 ──
-  Future<void> _selectStore() async {
-    final result = await SelectStorePage.show(
-      context,
-      showAll: true,
-      initialSelectedId: _activeStoreId,
-    );
-    if (result != null && mounted) {
-      setState(() {
-        final storeId = result['storeid']?.toString() ?? '';
-        _activeStoreId = storeId;
-        _sids = storeId.isNotEmpty ? [int.tryParse(storeId) ?? 0] : [];
-        _storeName = result['storename']?.toString() ?? '';
-        _page = 1;
-        _list = [];
-        _hasMore = true;
-      });
-      _loadData();
-    }
   }
 
   // ── 搜索 ──
@@ -402,7 +378,7 @@ class _EnquiryListPageState extends State<EnquiryListPage>
                             },
                           ),
                           const SizedBox(height: 20),
-                          // ── 要货门店（对齐 Vue storetypes: [1,2]） ──
+                          // ── 要货门店（对齐 Vue storetypes: [0,1,2]） ──
                           _buildFilterRow(
                             label: '要货门店',
                             value: tmpInname.isNotEmpty ? tmpInname : '全部',
@@ -411,7 +387,7 @@ class _EnquiryListPageState extends State<EnquiryListPage>
                                 ctx,
                                 showAll: true,
                                 initialSelectedId: tmpInid,
-                                storetypes: const [1, 2],
+                                storetypes: const [0, 1, 2],
                               );
                               if (result != null) {
                                 setSheetState(() {
@@ -451,11 +427,6 @@ class _EnquiryListPageState extends State<EnquiryListPage>
                             ],
                             value: tmpPhstatus,
                             onTap: (v) => setSheetState(() => tmpPhstatus = v),
-                            icons: const {
-                              '待配货': Icons.schedule,
-                              '部分配货': Icons.autorenew,
-                              '配货完成': Icons.check_circle_outline,
-                            },
                           ),
                           // ── 单据状态 ──
                           _buildChipFilter(
@@ -468,11 +439,6 @@ class _EnquiryListPageState extends State<EnquiryListPage>
                             ],
                             value: tmpDjstatus,
                             onTap: (v) => setSheetState(() => tmpDjstatus = v),
-                            icons: const {
-                              '正常': Icons.check_circle_outline,
-                              '终止': Icons.cancel_outlined,
-                              '已过期': Icons.event_busy_outlined,
-                            },
                           ),
                           // ── 加急状态 ──
                           _buildChipFilter(
@@ -484,10 +450,6 @@ class _EnquiryListPageState extends State<EnquiryListPage>
                             ],
                             value: tmpUrgentflag,
                             onTap: (v) => setSheetState(() => tmpUrgentflag = v),
-                            icons: const {
-                              '加急': Icons.bolt,
-                              '正常': Icons.done,
-                            },
                           ),
                           // ── 制单人 ──
                           _buildFilterRow(
@@ -743,7 +705,7 @@ class _EnquiryListPageState extends State<EnquiryListPage>
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: const BoxDecoration(
-          border: Border(bottom: BorderSide(color: Color(0xFFF0F0F0))),
+          border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
         ),
         child: Row(
           children: [
@@ -765,62 +727,47 @@ class _EnquiryListPageState extends State<EnquiryListPage>
     );
   }
 
-  /// chip 筛选行（配货状态/单据状态/加急状态）
-  /// [icons]：选项文字 → 图标映射（"全部"不配置即保持纯文字）
+  /// chip 筛选行（配货状态/单据状态/加急状态）：标题独占一行，选项按钮另起一行
   static Widget _buildChipFilter({
     required String label,
     required List<(String, String)> options,
     required String value,
     required void Function(String) onTap,
-    Map<String, IconData>? icons,
   }) {
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.symmetric(vertical: 10),
       decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xFFF0F0F0))),
+        border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 80,
-            child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
-          ),
-          Expanded(
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: options.map((opt) {
-                final selected = value == opt.$2;
-                final icon = icons?[opt.$1];
-                return GestureDetector(
-                  onTap: () => onTap(opt.$2),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: selected ? const Color(0xFF006EFF) : Colors.transparent,
-                      border: Border.all(
-                          color: selected ? const Color(0xFF006EFF) : const Color(0xFFDEDEDE)),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (icon != null) ...[
-                          Icon(icon,
-                              size: 16, color: selected ? Colors.white : const Color(0xFF333333)),
-                          const SizedBox(width: 4),
-                        ],
-                        Text(opt.$1,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: selected ? Colors.white : const Color(0xFF333333),
-                            )),
-                      ],
-                    ),
+          Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: options.map((opt) {
+              final selected = value == opt.$2;
+              return GestureDetector(
+                onTap: () => onTap(opt.$2),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: selected ? const Color(0xFF006EFF) : Colors.transparent,
+                    border: Border.all(
+                        color: selected ? const Color(0xFF006EFF) : const Color(0xFFDEDEDE)),
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                );
-              }).toList(),
-            ),
+                  child: Text(opt.$1,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: selected ? Colors.white : const Color(0xFF333333),
+                      )),
+                ),
+              );
+            }).toList(),
           ),
         ],
       ),
@@ -854,34 +801,6 @@ class _EnquiryListPageState extends State<EnquiryListPage>
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   child: Row(
                     children: [
-                      // 机构选择
-                      GestureDetector(
-                        onTap: _selectStore,
-                        child: Container(
-                          constraints: const BoxConstraints(maxWidth: 110),
-                          height: 36,
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: const Color(0xFFDEDEDE)),
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  _storeName.isNotEmpty ? _storeName : '全部机构',
-                                  style: const TextStyle(fontSize: 13, color: Color(0xFF333333)),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              const SizedBox(width: 2),
-                              const Icon(Icons.arrow_drop_down, size: 18, color: Color(0xFF666666)),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
                       // 搜索框
                       Expanded(
                         child: SizedBox(
