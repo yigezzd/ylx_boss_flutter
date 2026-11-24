@@ -24,9 +24,9 @@ import 'package:sp_util/sp_util.dart';
 enum _PFAction { none, save, sign, delete, print, retsign }
 
 class PfOrderEditPage extends StatefulWidget {
-  final Map<String, dynamic>? billData;
 
   const PfOrderEditPage({super.key, this.billData});
+  final Map<String, dynamic>? billData;
 
   @override
   State<PfOrderEditPage> createState() => _PfOrderEditPageState();
@@ -57,7 +57,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
   bool _detailLoading = false;
 
   bool _isSelectMode = false;
-  Set<int> _selectedIndices = {};
+  final Set<int> _selectedIndices = {};
 
   Map<String, dynamic>? _billData;
   String? _newBillid;
@@ -425,7 +425,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
     if (confirm != true) return;
 
     setState(() => _submitAction = _PFAction.sign);
-    request(HttpApi.pfOrderSign, _billData!).then((result) {
+    request(HttpApi.pfOrderSign, _billData).then((result) {
       if (!mounted) return;
       Toast.show('瀹℃牳鎴愬姛');
       Navigator.pop(context, true);
@@ -444,17 +444,17 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('鍙栨秷')),
+              child: Text('鍙栨秷')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('纭畾')),
+              child: Text('纭畾')),
         ],
       ),
     );
     if (confirm != true) return;
 
     setState(() => _submitAction = _PFAction.retsign);
-    request(HttpApi.pfOrderRetsign, _billData!).then((result) {
+    request(HttpApi.pfOrderRetsign, _billData).then((result) {
       if (!mounted) return;
       Toast.show('鍙嶅鎴愬姛');
       _loadDetail();
@@ -483,7 +483,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
     if (confirm != true) return;
 
     setState(() => _submitAction = _PFAction.delete);
-    request(HttpApi.pfOrderDelBill, _billData!).then((result) {
+    request(HttpApi.pfOrderDelBill, _billData).then((result) {
       if (!mounted) return;
       Toast.show('鍒犻櫎鎴愬姛');
       Navigator.pop(context, true);
@@ -673,14 +673,19 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.transparent,
-        builder: (_) => _ProDetailSheet(
-          productData: Map<String, dynamic>.from(prod),
-          initialPrice: price,
-          initialQty: qty,
-          initialGiftQty: giftQty,
-          initialRemark: prod['remark']?.toString() ?? '',
-          readOnly: false,
-          onSelectUnitSize: (type) => _showExtendOptions(type, prod),
+        builder: (_) => AnimatedPadding(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+          padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+          child: _ProDetailSheet(
+            productData: Map<String, dynamic>.from(prod),
+            initialPrice: price,
+            initialQty: qty,
+            initialGiftQty: giftQty,
+            initialRemark: prod['remark']?.toString() ?? '',
+            onSelectUnitSize: (type) => _showExtendOptions(type, prod),
+          ),
         ),
       );
       if (result2 != null && mounted) {
@@ -884,8 +889,8 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
                     },
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                      decoration: BoxDecoration(
-                        border: Border(bottom: BorderSide(color: const Color(0xFFF3F4F6))),
+                      decoration: const BoxDecoration(
+                        border: Border(bottom: BorderSide(color: Color(0xFFF3F4F6))),
                       ),
                       child: Row(
                         children: [
@@ -923,14 +928,20 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: raw,
-        initialPrice: double.tryParse(row.priceController.text) ?? 0,
-        initialQty: double.tryParse(row.qtyController.text) ?? 0,
-        initialGiftQty: double.tryParse(row.presentQtyController.text) ?? 0,
-        initialRemark: raw['remark']?.toString() ?? '',
-        readOnly: _readOnly,
-        onSelectUnitSize: (type) => _showExtendOptions(type, raw),
+      builder: (_) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: raw,
+          initialPrice: double.tryParse(row.priceController.text) ?? 0,
+          initialQty: double.tryParse(row.qtyController.text) ?? 0,
+          initialGiftQty: double.tryParse(row.presentQtyController.text) ?? 0,
+          initialRemark: raw['remark']?.toString() ?? '',
+          readOnly: _readOnly,
+          onSelectUnitSize: (type) => _showExtendOptions(type, raw),
+        ),
       ),
     );
     if (result != null && mounted) {
@@ -1023,7 +1034,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
   String get _totalOrderQty {
     double sum = 0;
     for (final row in _items) {
-      sum += (double.tryParse(row.qtyController.text) ?? 0);
+      sum += double.tryParse(row.qtyController.text) ?? 0;
     }
     return sum.toStringAsFixed(1);
   }
@@ -1172,8 +1183,8 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
           children: [
             Row(
               children: [
-                Text('鍒跺崟淇℃伅锟?createtime',
-                    style: const TextStyle(
+                const Text('鍒跺崟淇℃伅锟?createtime',
+                    style: TextStyle(
                         fontSize: 12,
                         color: Color(0xFF7A7A7A))),
                 const SizedBox(width: 16),
@@ -1237,7 +1248,6 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
       children: [
         SelectFieldItem(
           label: '鏈烘瀯',
-          required: false,
           value: _storeController.text,
           hint: '璇烽€夋嫨',
           onTap: () async {
@@ -1260,7 +1270,6 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
           label: '浠撳簱',
-          required: false,
           value: _warehouseController.text,
           hint: '璇烽€夋嫨',
           onTap: () async {
@@ -1281,7 +1290,6 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
           label: '瀹㈡埛',
-          required: false,
           value: _custController.text,
           hint: '璇烽€夋嫨',
           onTap: () async {
@@ -1300,8 +1308,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
         ),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
-          label: '涓氬姟锟?,
-          required: false,
+          label: '涓氬姟锟?,,
           value: _salesController.text,
           hint: '璇烽€夋嫨',
           onTap: () async {
@@ -1324,9 +1331,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
         _buildField(
           controller: _remarkController,
           label: '澶囨敞',
-          hint: '璇疯緭鍏ュ娉ㄤ俊锟?,
-          maxLines: 1,
-          verticalPadding: 10,
+          hint: '璇疯緭鍏ュ娉ㄤ俊锟?,,
         ),
       ],
     );
@@ -1335,7 +1340,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
   Widget _buildStickyHeader() {
     return Align(
       alignment: Alignment.topCenter,
-      child: Container(
+      child: ColoredBox(
         color: const Color(0xFFF5F5F5),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1530,17 +1535,17 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
               ),
             ),
             if (_items.isEmpty)
-              Padding(
+              const Padding(
                 padding:
-                    const EdgeInsets.symmetric(vertical: 32),
+                    EdgeInsets.symmetric(vertical: 32),
                 child: Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       LoadAssetImage('state/zwsp',
                           width: 80, height: 80),
-                      const SizedBox(height: 12),
-                      const Text('鏆傛棤鍟嗗搧鏄庣粏',
+                      SizedBox(height: 12),
+                      Text('鏆傛棤鍟嗗搧鏄庣粏',
                           style: TextStyle(
                               fontSize: 13,
                               color: Color(0xFF9CA3AF))),
@@ -1769,7 +1774,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
                     label: '鍙嶅锟?,
                     onTap: () {
                       if (!PermissionUtils.checkPermission(
-                          '012206', showTip: true)) return;
+                          '012206')) return;
                       _retsign();
                     },
                     primary: false,
@@ -1781,7 +1786,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
                     label: '鎵撳嵃',
                     onTap: () {
                       if (!PermissionUtils.checkPermission(
-                          '012207', showTip: true)) return;
+                          '012207')) return;
                       _print();
                     },
                     primary: false,
@@ -1830,7 +1835,6 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
                     label: '淇濆瓨',
                     onTap: _submit,
                     loading: _submitAction == _PFAction.save,
-                    primary: true,
                   ),
                 ),
               ],
@@ -1876,7 +1880,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
                   label: '淇濆瓨',
                   onTap: () {
                     if (!PermissionUtils.checkPermission(
-                        '012203', showTip: true)) return;
+                        '012203')) return;
                     _submit();
                   },
                   loading: _submitAction == _PFAction.save,
@@ -1889,11 +1893,10 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> {
                   label: '瀹℃牳',
                   onTap: () {
                     if (!PermissionUtils.checkPermission(
-                        '012205', showTip: true)) return;
+                        '012205')) return;
                     _sign();
                   },
                   loading: _submitAction == _PFAction.sign,
-                  primary: true,
                 ),
               ),
             ],
@@ -2056,13 +2059,6 @@ class _PFDetailRow {
 
 /// 鏄庣粏锟?Widget
 class _PFDetailItem extends StatefulWidget {
-  final _PFDetailRow row;
-  final int index;
-  final bool isSelectMode;
-  final bool isSelected;
-  final bool readOnly;
-  final VoidCallback onToggle;
-  final VoidCallback? onTap;
 
   const _PFDetailItem({
     required this.row,
@@ -2073,6 +2069,13 @@ class _PFDetailItem extends StatefulWidget {
     required this.onToggle,
     this.onTap,
   });
+  final _PFDetailRow row;
+  final int index;
+  final bool isSelectMode;
+  final bool isSelected;
+  final bool readOnly;
+  final VoidCallback onToggle;
+  final VoidCallback? onTap;
 
   @override
   State<_PFDetailItem> createState() => _PFDetailItemState();
@@ -2184,7 +2187,7 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                           final unit = raw?['unit']?.toString() ?? '';
                           final buf = StringBuffer(productName);
                           if (size.isNotEmpty) buf.write('/$size');
-                          if (unit.isNotEmpty) buf.write('$unit');
+                          if (unit.isNotEmpty) buf.write(unit);
                           return buf.toString();
                         }(),
                         style: const TextStyle(
@@ -2250,31 +2253,17 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                                             8),
                                 border:
                                     OutlineInputBorder(
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                        ),
                                 enabledBorder:
                                     OutlineInputBorder(
                                         borderSide: BorderSide(
                                             color: Color(
-                                                0xFFE5E7EB)),
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                                0xFFE5E7EB))),
                                 focusedBorder:
                                     OutlineInputBorder(
                                         borderSide: BorderSide(
                                             color: Color(
-                                                0xFF006EFF)),
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                                0xFF006EFF))),
                               ),
                               onChanged: (_) =>
                                   _notifyChange(),
@@ -2318,31 +2307,17 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                                             8),
                                 border:
                                     OutlineInputBorder(
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                        ),
                                 enabledBorder:
                                     OutlineInputBorder(
                                         borderSide: BorderSide(
                                             color: Color(
-                                                0xFFE5E7EB)),
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                                0xFFE5E7EB))),
                                 focusedBorder:
                                     OutlineInputBorder(
                                         borderSide: BorderSide(
                                             color: Color(
-                                                0xFF006EFF)),
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                                0xFF006EFF))),
                               ),
                               onChanged: (_) =>
                                   _notifyChange(),
@@ -2386,31 +2361,17 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                                             8),
                                 border:
                                     OutlineInputBorder(
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                        ),
                                 enabledBorder:
                                     OutlineInputBorder(
                                         borderSide: BorderSide(
                                             color: Color(
-                                                0xFFE5E7EB)),
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                                0xFFE5E7EB))),
                                 focusedBorder:
                                     OutlineInputBorder(
                                         borderSide: BorderSide(
                                             color: Color(
-                                                0xFF006EFF)),
-                                        borderRadius: BorderRadius
-                                            .all(
-                                            Radius
-                                                .circular(
-                                                4))),
+                                                0xFF006EFF))),
                               ),
                               onChanged: (_) =>
                                   _notifyChange(),
@@ -2441,11 +2402,11 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                             0;
                         final a = (q * p)
                                 .toStringAsFixed(2);
-                        return Padding(
+                        return const Padding(
                           padding:
-                              const EdgeInsets.only(top: 4),
+                              EdgeInsets.only(top: 4),
                           child: Text('閲戦锟?a',
-                              style: const TextStyle(
+                              style: TextStyle(
                                   fontSize: 12,
                                   color:
                                       Color(0xFF6B7280))),
@@ -2466,9 +2427,9 @@ class _PFDetailItemState extends State<_PFDetailItem> {
 /// 绮樻€ц〃澶翠唬锟?
 class _PFStickyHeaderDelegate
     extends SliverPersistentHeaderDelegate {
-  final _PfOrderEditPageState state;
 
   _PFStickyHeaderDelegate({required this.state});
+  final _PfOrderEditPageState state;
 
   @override
   double get minExtent => _PFMinExtent;
@@ -2501,13 +2462,6 @@ class _PFStickyHeaderDelegate
 
 // =================== 鍟嗗搧璇︽儏鎶藉眽 ===================
 class _ProDetailSheet extends StatefulWidget {
-  final Map<String, dynamic> productData;
-  final double initialPrice;
-  final double initialQty;
-  final double initialGiftQty;
-  final String initialRemark;
-  final bool readOnly;
-  final Future<Map<String, dynamic>?> Function(String type)? onSelectUnitSize;
 
   const _ProDetailSheet({
     required this.productData,
@@ -2518,6 +2472,13 @@ class _ProDetailSheet extends StatefulWidget {
     this.readOnly = false,
     this.onSelectUnitSize,
   });
+  final Map<String, dynamic> productData;
+  final double initialPrice;
+  final double initialQty;
+  final double initialGiftQty;
+  final String initialRemark;
+  final bool readOnly;
+  final Future<Map<String, dynamic>?> Function(String type)? onSelectUnitSize;
 
   @override
   State<_ProDetailSheet> createState() => _ProDetailSheetState();
@@ -2648,7 +2609,7 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                     _buildSelectField(label: '鍗曚綅', value: unit, onTap: widget.readOnly ? null : (data['packageflag']?.toString() != '1' || data['specflag']?.toString() == '1') ? () => _onSelect('unit') : null),
                     _buildDivider(),
                     // 瑙勬牸閫夋嫨
-                    _buildSelectField(label: '瑙勬牸', value: size, onTap: widget.readOnly ? null : (data['specflag']?.toString() == '1' && (data['unitonlyid'] == null || data['unitonlyid']?.toString().isEmpty == true)) ? () => _onSelect('size') : null),
+                    _buildSelectField(label: '瑙勬牸', value: size, onTap: widget.readOnly ? null : (data['specflag']?.toString() == '1' && (data['unitonlyid'] == null || (data['unitonlyid']?.toString().isEmpty ?? false))) ? () => _onSelect('size') : null),
                     _buildDivider(),
                     // 鏁伴噺
                     _buildFormField(label: '鏁伴噺', controller: _qtyCtrl, isDecimal: true, readOnly: widget.readOnly, onChanged: (_) => setState(() {})),
@@ -2795,10 +2756,10 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
             ),
             const SizedBox(width: 4),
             if (onTap != null)
-              Icon(
+              const Icon(
                 Icons.chevron_right,
                 size: 16,
-                color: const Color(0xFF9CA3AF),
+                color: Color(0xFF9CA3AF),
               ),
           ],
         ),
@@ -2823,7 +2784,7 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
           ),
           Expanded(
             child: Text(
-              '${amount.toStringAsFixed(2)}',
+              amount.toStringAsFixed(2),
               textAlign: TextAlign.right,
               style: const TextStyle(
                 fontSize: 14,
@@ -2994,7 +2955,7 @@ void _writeData(String key, Map<String, dynamic> row) {
     final refprice =
         double.tryParse(row['refprice']?.toString() ?? '0') ?? 0;
     row['price'] = MathUtils.roundTo(
-        MathUtils.mul(MathUtils.divide(rate, 100), refprice), 2);
+        MathUtils.mul(MathUtils.divide(rate, 100), refprice));
   } else if (key == 'refprice') {
     row['refprice'] =
         double.tryParse(row['refprice']?.toString() ?? '') ?? 0;
@@ -3002,7 +2963,7 @@ void _writeData(String key, Map<String, dynamic> row) {
         double.tryParse(row['refprice']?.toString() ?? '0') ?? 0;
     final rate = double.tryParse(row['rate']?.toString() ?? '0') ?? 0;
     row['price'] = MathUtils.roundTo(
-        MathUtils.divide(MathUtils.mul(refprice, rate), 100) as double, 2);
+        MathUtils.divide(MathUtils.mul(refprice, rate), 100));
     final qty = double.tryParse(row['qty']?.toString() ?? '0') ?? 0;
     row['ckjamt'] =
         MathUtils.roundTo(MathUtils.mul(refprice, qty), 3);
@@ -3025,8 +2986,7 @@ void _writeData(String key, Map<String, dynamic> row) {
     row['price'] = MathUtils.roundTo(
         qty == 0
             ? (double.tryParse(row['price']?.toString() ?? '0') ?? 0)
-            : MathUtils.divide(amt, qty),
-        2);
+            : MathUtils.divide(amt, qty));
     row['rate'] = MathUtils.roundTo(
         MathUtils.mul(refprice > 0 ? MathUtils.divide(
             double.tryParse(row['price']?.toString() ?? '0') ?? 0, refprice) : 0, 100),

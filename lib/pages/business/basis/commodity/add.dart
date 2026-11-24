@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_deer/components/select/select_brand.dart';
@@ -51,6 +52,7 @@ const Map<String, dynamic> _formDefault = {
   'memorytype': 1,
   'supid': '',
   'supname': '',
+  'supcode': '',
   'inprice': '',
   'sellprice': '',
   'grossrate': '',
@@ -83,6 +85,7 @@ const Map<String, dynamic> _formDefault = {
   'snflag': 0,
   'freshflag': 0,
   'freepriceflag': 0,
+  'saleweighflag': 0,
   'nousecouponsflag': 0,
   'promotionflag': 1,
   'home': '',
@@ -148,6 +151,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     {'code': ''}
   ];
   bool _resettingForm = false; // 重置时禁止 listener 触发 setState
+  bool _duplicateDialogVisible = false; // 条码重复选择弹窗是否打开
+  bool _savedInContinue = false; // 「保存并继续」是否已成功保存过（返回时回传给列表）
 
   bool get _isEdit =>
       widget.productData != null &&
@@ -215,7 +220,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     {'label': '自动拆分', 'value': 4},
     {'label': '自动组装', 'value': 5},
     {'label': '特价打包', 'value': 8},
-    {'label': '兑奖换购', 'value': 10},
+    // {'label': '兑奖换购', 'value': 10},
   ];
 
   /// 商品类型选项（包装配置模式下动态追加「包装单位」，对齐小程序 itemypeList）
@@ -228,6 +233,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   int get _packagSettingMode {
     try {
       final cfgStr = SpUtil.getString(Constant.loginParamResp) ?? '';
+
       if (cfgStr.isNotEmpty) {
         final cfg = jsonDecode(cfgStr) as Map<String, dynamic>;
         return int.tryParse(cfg['packagSettingMode']?.toString() ?? '') ?? 0;
@@ -236,7 +242,41 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     return 0;
   }
 
+  bool get _showInprice {
+    try {
+      final cfgStr = SpUtil.getString(Constant.user) ?? '';
+      if (cfgStr.isNotEmpty) {
+        final cfg = jsonDecode(cfgStr) as Map<String, dynamic>;
+        if (int.tryParse(cfg['inpriceflag']?.toString() ?? '') == 1) return true;
+      }
+    } catch (_) {}
+    try {
+      final userStr = SpUtil.getString(Constant.user) ?? '';
+      if (userStr.isNotEmpty) {
+        final u = jsonDecode(userStr) as Map<String, dynamic>;
+        if (u['code']?.toString() == '1001') return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /// 毛利率查看权限（对齐小程序 basis.vue：跟随进价权限，无权限时显示 ***）
+  bool get _showGrossrate => _showInprice;
+
   int get _formItemtype => int.tryParse(_form['itemtype'].toString()) ?? 1;
+
+  /// 配送价查看权限（对齐小程序 basis.vue：pspriceflag==1 或管理员 code==1001 时显示）
+  bool get _showPsprice {
+    try {
+      final userStr = SpUtil.getString(Constant.user) ?? '';
+      if (userStr.isNotEmpty) {
+        final u = jsonDecode(userStr) as Map<String, dynamic>;
+        if (int.tryParse(u['pspriceflag']?.toString() ?? '') == 1) return true;
+        if (u['code']?.toString() == '1001') return true;
+      }
+    } catch (_) {}
+    return false;
+  }
 
   /// 是否展示「包装单位」Tab（对齐小程序：packagSettingMode==1 且非拆分/组装类）
   bool get _showPackUnitTab => _packagSettingMode == 1 && ![2, 3, 4, 5].contains(_formItemtype);
@@ -244,7 +284,19 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   /// 是否展示「包装配置」Tab（对齐小程序：packagSettingMode==2 且 itemtype==9 包装单位商品）
   bool get _showPackConfigTab => _packagSettingMode == 2 && _formItemtype == 9;
 
+  /// 包装设置模式为"包装单位关联基本单位"（packagSettingMode==2）时隐藏采购/批发/配送单位（对齐后台 businessUnitVisible）
+  bool get _showBusinessUnitFields => _packagSettingMode != 2;
+
   int get _tabLength => (_showPackUnitTab || _showPackConfigTab) ? 3 : 2;
+
+  /// 供应商展示文案：统一为「[编码]名称」（对齐小程序 basis.vue 供应商行）
+  /// 选择供应商时 supname 已含编码前缀，此时不再重复拼接
+  String get _supDisplayName {
+    final name = _form['supname']?.toString() ?? '';
+    if (name.isEmpty || name.startsWith('[')) return name;
+    final code = _form['supcode']?.toString() ?? '';
+    return code.isEmpty ? name : '[$code]$name';
+  }
 
   /// 商品类型变化时动态重建 TabController（长度随 packagSettingMode 与 itemtype 变化）
   void _syncTabController() {
@@ -340,6 +392,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   final FocusNode _outtaxrateFocusNode = FocusNode();
   final FocusNode _deductvalueFocusNode = FocusNode();
   final FocusNode _joinrateFocusNode = FocusNode();
+  // 条码输入框焦点（失焦查重，对齐后台 checkBarcodeDuplicate）
+  final FocusNode _barcodeFocusNode = FocusNode();
 
   /// controller → _form key 映射
   late final Map<TextEditingController, String> _ctrlKeyMap = {
@@ -404,9 +458,21 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
         }
       });
     }
+    // 基本单位变更时联动采购/批发/配送单位（对齐后台 businessUnitFields）
+    _unitController.addListener(() {
+      if (_resettingForm) return;
+      _syncBusinessUnits();
+    });
     // 失焦格式化（对齐 Vue priceBlur）
     _addBlurListener(_inpriceFocusNode, _inpriceController, 2);
     _addBlurListener(_sellpriceFocusNode, _sellpriceController, 2);
+    // 进价/零售价失焦后按系统参数自动加价（对齐 Web/小程序 priceBlur 自动加价段）
+    _inpriceFocusNode.addListener(() {
+      if (!_inpriceFocusNode.hasFocus) _autoAddPrice('inprice');
+    });
+    _sellpriceFocusNode.addListener(() {
+      if (!_sellpriceFocusNode.hasFocus) _autoAddPrice('sellprice');
+    });
     _addBlurListener(_grossrateFocusNode, _grossrateController, 2);
     _addBlurListener(_pspriceFocusNode, _pspriceController, 2);
     _addBlurListener(_minsellpriceFocusNode, _minsellpriceController, 2);
@@ -420,6 +486,12 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     _addBlurListener(_outtaxrateFocusNode, _outtaxrateController, 1, clampMax: 1);
     _addBlurListener(_deductvalueFocusNode, _deductvalueController, 2);
     _addBlurListener(_joinrateFocusNode, _joinrateController, 1);
+    // 条码失焦查重（对齐后台 checkBarcodeDuplicate）
+    _barcodeFocusNode.addListener(() {
+      if (!_barcodeFocusNode.hasFocus) {
+        _checkBarcodeDuplicate();
+      }
+    });
     if (_isEdit) {
       _loadDetail();
     } else if (widget.initialTypeId != null && widget.initialTypeId!.isNotEmpty) {
@@ -457,6 +529,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       _outtaxrateFocusNode,
       _deductvalueFocusNode,
       _joinrateFocusNode,
+      _barcodeFocusNode,
     ]) {
       fn.dispose();
     }
@@ -612,6 +685,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       'snflag': 0,
       'freshflag': 0,
       'freepriceflag': 0,
+      'saleweighflag': 0,
       'promotionflag': 0,
       'itemstatus': 2,
       'deducttype': 1,
@@ -623,6 +697,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     }
 
     _resettingForm = false;
+    // 详情填充完成后同步业务单位：按已存值重建来源行引用（行改名跟随、行删除回落基本单位）
+    _syncBusinessUnits(notify: false, reset: true);
   }
 
   static int _parseIntOr(dynamic val, int defaultVal) {
@@ -692,6 +768,97 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     }
   }
 
+  // =================== 自动加价联动（对齐 Web/小程序 priceBlur）===================
+  /// 进价/零售价失焦后按系统参数自动加价：
+  /// productAutoPrice[0]=新建商品档案、[2]=修改商品档案 场景开启，且相对进价/零售价基准匹配时，
+  /// 联动零售价/进价互算、批发价1/会员价1/配送价及会员批发等级价格
+  void _autoAddPrice(String key) {
+    final price = double.tryParse(_form[key]?.toString() ?? '') ?? 0;
+    if (price <= 0) return;
+    // 读取登录参数（对齐 Web/小程序 loginParamResp）
+    Map<String, dynamic> cfg = {};
+    try {
+      final cfgStr = SpUtil.getString(Constant.loginParamResp) ?? '';
+      if (cfgStr.isNotEmpty) {
+        cfg = jsonDecode(cfgStr) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+    final flags = (cfg['productAutoPrice']?.toString() ?? '').split('');
+    final addpriceflag = flags.isNotEmpty ? flags[0] : '';
+    final editpriceflag = flags.length > 2 ? flags[2] : '';
+    final productGentPrice = cfg['productGentPrice']?.toString() ?? '';
+    // 场景开关（新建/修改商品档案）与加价基准（相对进价/零售价）不匹配时不联动
+    if (!((addpriceflag == '1' && !_isEdit) || (editpriceflag == '1' && _isEdit))) return;
+    if (!((productGentPrice == '1' && key == 'inprice') ||
+        (productGentPrice == '2' && key == 'sellprice'))) return;
+
+    // 进价零售互算：相对进价时由进价算零售价；相对零售价时由零售价反算进价
+    final productPrice = double.tryParse(cfg['productPrice']?.toString() ?? '') ?? 0;
+    if (productPrice > 0) {
+      final newKey = key == 'inprice' ? 'sellprice' : 'inprice';
+      final value = MathUtils.formatDecimal(
+          2, MathUtils.multiply(price, MathUtils.divide(productPrice, 100)));
+      _form[newKey] = value;
+      _setControllerText(newKey, value);
+    }
+
+    // 其他加价：批发价1/会员价1/配送价按各自加价率计算
+    final otherAddPrice = <String, double>{
+      'pfprice1': double.tryParse(cfg['productPfPrice']?.toString() ?? '') ?? 0,
+      'mprice1': double.tryParse(cfg['productVipPrice']?.toString() ?? '') ?? 0,
+      'psprice': double.tryParse(cfg['productPsPrice']?.toString() ?? '') ?? 0,
+    };
+    otherAddPrice.forEach((newKey, rateValue) {
+      if (rateValue > 0) {
+        final value =
+            MathUtils.formatDecimal(2, MathUtils.multiply(price, MathUtils.divide(rateValue, 100)));
+        _form[newKey] = value;
+        _setControllerText(newKey, value);
+      }
+    });
+
+    // 会员批发等级：系统参数设置了等级加价率时按其计算，未设置沿用等级1价格
+    // 等级2/3与等级1同基准：相对进价时基于进价；相对零售价时基于进价（零售价仅用于反算进价）
+    final inprice = double.tryParse(_form['inprice']?.toString() ?? '') ?? 0;
+    final levelBase = productGentPrice == '2' && inprice > 0 ? inprice : price;
+    final memberPriceLevel = int.tryParse(cfg['memberPriceLevel']?.toString() ?? '') ?? 3;
+    final pfPriceLevel = int.tryParse(cfg['pfPriceLevel']?.toString() ?? '') ?? 3;
+    String? calcLevelPrice(dynamic rate) {
+      final r = double.tryParse(rate?.toString() ?? '') ?? 0;
+      if (levelBase > 0 && r > 0) {
+        return MathUtils.formatDecimal(2, MathUtils.multiply(levelBase, MathUtils.divide(r, 100)));
+      }
+      return null;
+    }
+
+    void setLevelPrice(String newKey, String? value, String fallbackKey) {
+      final v = value ?? (_form[fallbackKey]?.toString() ?? '');
+      _form[newKey] = v;
+      _setControllerText(newKey, v);
+    }
+
+    if (memberPriceLevel > 2)
+      setLevelPrice('mprice2', calcLevelPrice(cfg['productVipPrice2']), 'mprice1');
+    if (memberPriceLevel == 3)
+      setLevelPrice('mprice3', calcLevelPrice(cfg['productVipPrice3']), 'mprice1');
+    if (pfPriceLevel >= 2)
+      setLevelPrice('pfprice2', calcLevelPrice(cfg['productPfPrice2']), 'pfprice1');
+    if (pfPriceLevel == 3)
+      setLevelPrice('pfprice3', calcLevelPrice(cfg['productPfPrice3']), 'pfprice1');
+
+    // 价格联动后重算毛利率
+    _jsGrossrate();
+  }
+
+  /// 按表单字段名回写 controller 文本（自动加价联动用）
+  void _setControllerText(String key, String value) {
+    for (final entry in _ctrlKeyMap.entries) {
+      if (entry.value == key && entry.key.text != value) {
+        entry.key.text = value;
+      }
+    }
+  }
+
   // =================== 表单辅助方法 ===================
 
   /// 更新 _form 整型字段
@@ -702,6 +869,29 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   // ── 便捷 getter（从 _form 读取，供 UI 使用）──
   List<Map<String, dynamic>> get _packList =>
       (_form['packpage'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+
+  /// 主商品价格（包装数量失焦自动补价的基准，对齐后台 calcPackagePrice 取 query.value[field]）
+  Map<String, dynamic> get _mainPrices => {
+        for (final key in const [
+          'inprice',
+          'sellprice',
+          'mprice1',
+          'mprice2',
+          'mprice3',
+          'pfprice1',
+          'pfprice2',
+          'pfprice3'
+        ])
+          key: _form[key] ?? ''
+      };
+
+  /// 默认单位唯一：某行开启默认单位时其余行置 0（对齐后台 changeSwitch；单位状态 stopflag 不做互斥）
+  void _enforceDefaultPackUnit(List<Map<String, dynamic>> list, Map<String, dynamic> row) {
+    if (row['defsizeflag']?.toString() != '1') return;
+    for (final item in list) {
+      if (!identical(item, row)) item['defsizeflag'] = 0;
+    }
+  }
 
   /// 根据 itemtype 返回 extendlist 在 _form 中对应的 key
   String get _extendlistKey {
@@ -728,6 +918,83 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       (_form[_extendlistKey] as List?)?.cast<Map<String, dynamic>>() ?? [];
   List<Map<String, dynamic>> get _sizedata =>
       (_form['sizedata'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+
+  // =================== 采购/批发/配送单位（业务逻辑对齐后台 basis.vue）===================
+
+  /// 业务单位选中来源：row 为包装单位行/包装配置行对象引用（null=跟随基本单位），unit 为上次解析后的值
+  final Map<String, _BusinessUnitRef> _businessUnitSelections = {};
+
+  /// 业务单位来源行：包装配置模式(itemtype=9)取包装配置行，否则取包装单位行
+  List<Map<String, dynamic>> get _businessUnitRows =>
+      (_packagSettingMode == 2 && _formItemtype == 9) ? _packlinkpro : _packList;
+
+  /// 来源行的单位名（包装配置行取 unit，包装单位行取 sunit）
+  String _businessUnitRowUnit(Map<String, dynamic> row) =>
+      (_packagSettingMode == 2 && _formItemtype == 9)
+          ? (row['unit']?.toString() ?? '')
+          : (row['sunit']?.toString() ?? '');
+
+  /// 业务单位可选值 = 基本单位 + 已有包装单位（去重、保持顺序）
+  /// 取值保持原样（不做 trim），与后台 businessUnitOptions 及保存参数保持一致
+  List<String> get _businessUnitOptions {
+    final units = <String>[];
+    final base = _form['unit']?.toString() ?? '';
+    if (base.trim().isNotEmpty) units.add(base);
+    for (final row in _businessUnitRows) {
+      final unit = _businessUnitRowUnit(row);
+      if (unit.trim().isNotEmpty && !units.contains(unit)) units.add(unit);
+    }
+    return units;
+  }
+
+  /// 按单位名匹配第一条来源行（为空或与基本单位同名时返回 null，表示跟随基本单位）
+  Map<String, dynamic>? _matchBusinessUnitRow(
+      List<Map<String, dynamic>> rows, String unit, String baseUnit) {
+    if (unit.isEmpty || unit == baseUnit) return null;
+    for (final row in rows) {
+      if (_businessUnitRowUnit(row) == unit) return row;
+    }
+    return null;
+  }
+
+  /// 按对象引用查找来源行（行被替换或删除时返回 null）
+  Map<String, dynamic>? _findBusinessUnitRow(
+      List<Map<String, dynamic>> rows, Map<String, dynamic>? ref) {
+    if (ref == null) return null;
+    for (final row in rows) {
+      if (identical(row, ref)) return row;
+    }
+    return null;
+  }
+
+  /// 业务单位联动（对齐后台 watch 回退行为）：
+  /// - 选中包装单位时按行引用记录来源：行改名则跟随新名
+  /// - 来源行被删除或单位被清空时回落当前基本单位
+  /// - 基本单位变更时，仍跟随基本单位的业务单位一并跟随
+  /// - reset=true（加载详情/重置表单）时按当前值重建来源
+  void _syncBusinessUnits({bool notify = true, bool reset = false}) {
+    final baseUnit = _form['unit']?.toString() ?? '';
+    final rows = _businessUnitRows;
+    var changed = false;
+    for (final field in const ['defcgunit', 'defpfunit', 'defpsunit']) {
+      final selectedUnit = _form[field]?.toString() ?? '';
+      final current = _businessUnitSelections[field];
+      final selection = (reset || current == null || selectedUnit != current.unit)
+          ? _BusinessUnitRef(_matchBusinessUnitRow(rows, selectedUnit, baseUnit), selectedUnit)
+          : current;
+      // 按行引用解析：改名跟随新名、行被删除/清空则回落基本单位
+      final refRow = _findBusinessUnitRow(rows, selection.row);
+      final refUnit = refRow != null ? _businessUnitRowUnit(refRow) : '';
+      if (refUnit.trim().isEmpty) selection.row = null;
+      selection.unit = refUnit.trim().isNotEmpty ? refUnit : baseUnit;
+      _businessUnitSelections[field] = selection;
+      if ((_form[field]?.toString() ?? '') != selection.unit) {
+        _form[field] = selection.unit;
+        changed = true;
+      }
+    }
+    if (changed && notify && mounted) setState(() {});
+  }
 
   /// 价格字段为空时默认返回 '0'
   static String _pv(dynamic val) {
@@ -775,16 +1042,27 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       Toast.show('请选择供应商');
       return false;
     }
-    // 采购/批发/配送单位必填（对齐 Vue edit.vue L904-913）
-    if ((_form['defcgunit']?.toString().trim() ?? '').isEmpty) {
-      Toast.show('请选择采购单位');
+    // 经销方式不能为空（0 视为未设置，与 Web basis.vue 校验一致）
+    if (_parseIntOr(_form['selltype'], 0) == 0) {
+      Toast.show('经销方式不能为空');
       return false;
-    } else if ((_form['defpfunit']?.toString().trim() ?? '').isEmpty) {
-      Toast.show('请选择批发单位');
-      return false;
-    } else if ((_form['defpsunit']?.toString().trim() ?? '').isEmpty) {
-      Toast.show('请选择配送单位');
-      return false;
+    }
+    // 采购/批发/配送单位必填（与后台 basis.vue rules 保持一致）
+    // 正常情况下 _syncBusinessUnits 已按"基本单位 + 包装单位"自动回落填充，此处为兜底校验
+    // 包装设置模式为"包装单位关联基本单位"（packagSettingMode==2）时三单位隐藏，跳过必填校验
+    if (_showBusinessUnitFields) {
+      if ((_form['defcgunit']?.toString().trim() ?? '').isEmpty) {
+        Toast.show('请选择采购单位');
+        return false;
+      }
+      if ((_form['defpfunit']?.toString().trim() ?? '').isEmpty) {
+        Toast.show('请选择批发单位');
+        return false;
+      }
+      if ((_form['defpsunit']?.toString().trim() ?? '').isEmpty) {
+        Toast.show('请选择配送单位');
+        return false;
+      }
     }
     // 特殊商品类型明细数据校验（Vue L875-888）
     final itemtype = (_form['itemtype'] ?? 1) as int;
@@ -850,6 +1128,13 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
         sellprice < mprice1 &&
         mprice1 > 0) {
       Toast.show('商品参数不允许零售价小于会员价1，请检查');
+      return false;
+    }
+    // 包装单位行：有包装单位的行包装名称必填
+    // （与后台 rules.packname 一致，AddPackagePage 已校验，此处为兜底）
+    final noPackName = _packList.where((item) => (item['packname']?.toString() ?? '').isEmpty);
+    if (noPackName.isNotEmpty) {
+      Toast.show('请填写包装单位【${noPackName.first['sunit'] ?? ''}】的包装名称');
       return false;
     }
     // 条码重复校验：商品条码不能和包装条码、规格条码相同（Vue L467-476）
@@ -920,6 +1205,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       'memorytype': _form['memorytype'] ?? 1,
       'supid': _form['supid']?.toString() ?? '',
       'supname': _form['supname']?.toString() ?? '',
+      'supcode': _form['supcode']?.toString() ?? '',
       'inprice': _pv(_form['inprice']),
       'sellprice': _pv(_form['sellprice']),
       'grossrate': _pv(_form['grossrate']),
@@ -955,6 +1241,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       'snflag': _form['snflag'] ?? 0,
       'freshflag': _form['freshflag'] ?? 0,
       'freepriceflag': _form['freepriceflag'] ?? 0,
+      'saleweighflag': _form['saleweighflag'] ?? 0,
       'nousecouponsflag': _form['nousecouponsflag'] ?? 0,
       'promotionflag': _form['promotionflag'] ?? 0,
       'home': _form['home']?.toString().trim() ?? '',
@@ -1019,7 +1306,10 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     request(HttpApi.productAddInfo, params).then((_) {
       if (!mounted) return;
       Toast.show('新增成功');
-      _resetForm(keepType: true, keepSupplier: true, keepUnit: true);
+      // 记录本次已产生新增数据，退出页面时回传列表触发刷新
+      _savedInContinue = true;
+      // 保留分类/供应商/单位/计价方式（对齐小程序保存并继续 examplefield）
+      _resetForm(keepType: true, keepSupplier: true, keepUnit: true, keepPriceType: true);
       // 对齐小程序保存并继续：重置后重新获取条码和自编码
       _autoGenBarcodeAndCode();
     }).whenComplete(() {
@@ -1027,8 +1317,18 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     });
   }
 
+  /// 返回列表：把「保存并继续」产生的新增结果回传，供列表决定是否刷新
+  void _onBackPressed() {
+    Navigator.pop(context, _savedInContinue ? true : null);
+  }
+
   /// 重置表单（直接操作 _form，controller 通过 listener 自动同步）
-  void _resetForm({bool keepType = false, bool keepSupplier = false, bool keepUnit = false}) {
+  void _resetForm({
+    bool keepType = false,
+    bool keepSupplier = false,
+    bool keepUnit = false,
+    bool keepPriceType = false,
+  }) {
     _resettingForm = true;
     // 重置前先快照需要保留的字段（新增模式下 _productData 为 null，须从当前 _form 取值）
     final oldForm = _form;
@@ -1050,10 +1350,15 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       if (keepSupplier) {
         _form['supid'] = oldForm['supid'] ?? '';
         _form['supname'] = oldForm['supname'] ?? '';
+        _form['supcode'] = oldForm['supcode'] ?? '';
       }
       // 保留单位
       if (keepUnit) {
         _form['unit'] = oldForm['unit'] ?? '';
+      }
+      // 保留计价方式（对齐小程序 examplefield 携带 pricetype）
+      if (keepPriceType) {
+        _form['pricetype'] = oldForm['pricetype'] ?? 1;
       }
 
       _imageurl = '';
@@ -1073,6 +1378,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     _syncTabController();
 
     _resettingForm = false;
+    // 重置后重新同步业务单位（保存并继续时基本单位可能被保留）
+    _syncBusinessUnits(reset: true);
   }
 
   /// 删除商品
@@ -1107,7 +1414,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   Widget build(BuildContext context) {
     // 键盘弹出时隐藏底部操作栏，避免遮挡输入框（MediaQuery 依赖自动响应键盘变化）
     final keyboardVisible = MediaQuery.of(context).viewInsets.bottom > 0;
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1116,7 +1423,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? '编辑商品' : '新增商品',
@@ -1157,6 +1464,14 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
               ],
             ),
       bottomNavigationBar: keyboardVisible ? null : _buildBottomBar(),
+    );
+    // 拦截系统返回，统一回传「保存并继续」的结果
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1480,6 +1795,10 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                 } else {
                   _setIntField('freshflag', 0);
                 }
+                // 后台新增：非计份商品(3)时，零售销售称重必须为0
+                if (v != 3) {
+                  _setIntField('saleweighflag', 0);
+                }
               },
             ),
             kDivider,
@@ -1493,7 +1812,7 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
             SelectFieldItem(
               label: '供应商',
               required: true,
-              value: _form['supname']?.toString() ?? '',
+              value: _supDisplayName,
               enabled: !_isReadOnly,
               labelWidth: 90,
               onTap: () async {
@@ -1506,12 +1825,11 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                   setState(() {
                     _form['supid'] = result['supid']?.toString();
                     _form['supname'] = result['supname']?.toString();
-                    // 经销方式跟随供应商（对齐小程序 onChangesup：selltype = supselltype）
+                    _form['supcode'] = result['supcode']?.toString() ?? '';
+                    // 经销方式跟随供应商，货商未设置经销方式时默认购销（对齐 Web basis.vue changeSup）
                     final selltype = int.tryParse(result['selltype']?.toString() ?? '');
                     final joinrate = double.tryParse(result['joinrate']?.toString() ?? '');
-                    if (selltype != null) {
-                      _form['selltype'] = selltype;
-                    }
+                    _form['selltype'] = selltype ?? 1;
                     if (joinrate != null) {
                       _form['joinrate'] = joinrate;
                       _joinrateController.text = joinrate.toString();
@@ -1524,77 +1842,25 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
             // 经销方式（只读，联营/扣率代销/租赁时显示联营比例）
             _buildSelltypeRow(),
             kDivider,
-            // 采购单位（必填，对齐小程序 basis.vue defcgunit）
-            _buildSelectRow(
-              label: '采购单位',
-              value: _form['defcgunit']?.toString() ?? '',
-              enabled: !_isReadOnly,
-              required: true,
-              labelWidth: 90,
-              onTap: () async {
-                final result = await SelectUnitPage.show(
-                  context,
-                  title: '选择采购单位',
-                  initialSelectedId: _form['defcgunit']?.toString(),
-                );
-                if (result != null && mounted) {
-                  setState(() {
-                    _form['defcgunit'] = result['name']?.toString() ?? '';
-                  });
-                }
-              },
-            ),
+            // 采购单位（可选范围：基本单位 + 包装单位）
+            _buildBusinessUnitRow(label: '采购单位', field: 'defcgunit', title: '选择采购单位'),
             kDivider,
-            // 批发单位（必填，对齐小程序 basis.vue defpfunit）
-            _buildSelectRow(
-              label: '批发单位',
-              value: _form['defpfunit']?.toString() ?? '',
-              enabled: !_isReadOnly,
-              required: true,
-              labelWidth: 90,
-              onTap: () async {
-                final result = await SelectUnitPage.show(
-                  context,
-                  title: '选择批发单位',
-                  initialSelectedId: _form['defpfunit']?.toString(),
-                );
-                if (result != null && mounted) {
-                  setState(() {
-                    _form['defpfunit'] = result['name']?.toString() ?? '';
-                  });
-                }
-              },
-            ),
+            // 批发单位
+            _buildBusinessUnitRow(label: '批发单位', field: 'defpfunit', title: '选择批发单位'),
             kDivider,
-            // 配送单位（必填，对齐小程序 basis.vue defpsunit）
-            _buildSelectRow(
-              label: '配送单位',
-              value: _form['defpsunit']?.toString() ?? '',
-              enabled: !_isReadOnly,
-              required: true,
-              labelWidth: 90,
-              onTap: () async {
-                final result = await SelectUnitPage.show(
-                  context,
-                  title: '选择配送单位',
-                  initialSelectedId: _form['defpsunit']?.toString(),
-                );
-                if (result != null && mounted) {
-                  setState(() {
-                    _form['defpsunit'] = result['name']?.toString() ?? '';
-                  });
-                }
-              },
-            ),
+            // 配送单位
+            _buildBusinessUnitRow(label: '配送单位', field: 'defpsunit', title: '选择配送单位'),
             kDivider,
-            // 进货价
-            _buildNumberField(
-                controller: _inpriceController,
-                label: '进货价',
-                readOnly: _isReadOnly,
-                focusNode: _inpriceFocusNode,
-                onChanged: (_) => _onInpriceChanged()),
-            kDivider,
+            // 进货价（权限：inpriceflag==1 或管理员 code==1001 时显示，对齐小程序 basis.vue）
+            if (_showInprice) ...[
+              _buildNumberField(
+                  controller: _inpriceController,
+                  label: '进货价',
+                  readOnly: _isReadOnly,
+                  focusNode: _inpriceFocusNode,
+                  onChanged: (_) => _onInpriceChanged()),
+              kDivider,
+            ],
             // 零售价
             _buildNumberField(
                 controller: _sellpriceController,
@@ -1603,22 +1869,27 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                 focusNode: _sellpriceFocusNode,
                 onChanged: (_) => _onSellpriceChanged()),
             kDivider,
-            // 毛利率(%)
-            _buildNumberField(
-                controller: _grossrateController,
-                label: '毛利率(%)',
-                hint: '自动计算',
-                readOnly: _isReadOnly,
-                focusNode: _grossrateFocusNode,
-                onChanged: (_) => _onGrossrateChanged()),
+            // 毛利率(%)（权限：跟随进价查看权限，无权限时显示 ***，对齐小程序 basis.vue）
+            if (_showGrossrate)
+              _buildNumberField(
+                  controller: _grossrateController,
+                  label: '毛利率(%)',
+                  hint: '自动计算',
+                  readOnly: _isReadOnly,
+                  focusNode: _grossrateFocusNode,
+                  onChanged: (_) => _onGrossrateChanged())
+            else
+              _buildReadOnlyField(label: '毛利率(%)', value: '***'),
             kDivider,
-            // 配送价
-            _buildNumberField(
-                controller: _pspriceController,
-                label: '配送价',
-                readOnly: _isReadOnly,
-                focusNode: _pspriceFocusNode),
-            kDivider,
+            // 配送价（权限：pspriceflag==1 或管理员 code==1001 时显示，对齐小程序 basis.vue）
+            if (_showPsprice) ...[
+              _buildNumberField(
+                  controller: _pspriceController,
+                  label: '配送价',
+                  readOnly: _isReadOnly,
+                  focusNode: _pspriceFocusNode),
+              kDivider,
+            ],
             // 最低售价
             _buildNumberField(
                 controller: _minsellpriceController,
@@ -2002,6 +2273,14 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
               },
             ),
             kDivider,
+            // 零售销售称重（对齐 Vue：仅计价方式为计份商品(3)时可操作）
+            _buildRightSwitchField(
+              label: '零售销售称重',
+              value: (_form['saleweighflag'] ?? 0) == 1,
+              enabled: !_isReadOnly && (_form['pricetype'] ?? 1) == 3,
+              onChanged: (v) => _setIntField('saleweighflag', v ? 1 : 0),
+            ),
+            kDivider,
             // 不参与优惠（对齐 Vue basis.vue query.nousecouponsflag，默认 0）
             _buildRightSwitchField(
               label: '不参与优惠',
@@ -2076,6 +2355,18 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
               hint: '请输入',
               readOnly: _isReadOnly,
             ),
+            kDivider,
+            // ── 最后入库时间（只读展示，对齐小程序 more.vue lastindate）──
+            _buildReadOnlyField(
+              label: '最后入库时间',
+              value: _form['lastindate']?.toString() ?? '',
+            ),
+            kDivider,
+            // ── 最后销售时间（只读展示，对齐小程序 more.vue lastsaledate）──
+            _buildReadOnlyField(
+              label: '最后销售时间',
+              value: _form['lastsaledate']?.toString() ?? '',
+            ),
           ],
         ),
       ),
@@ -2125,6 +2416,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                             final list = List<Map<String, dynamic>>.from(_packList);
                             list.removeAt(index);
                             _form['packpage'] = list;
+                            // 包装单位删除后，业务单位不在可选范围内则回落基本单位
+                            _syncBusinessUnits(notify: false);
                           });
                         },
                       ),
@@ -2179,6 +2472,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
           mainBarcode: _form['barcode']?.toString().trim() ?? '',
           specBarcodes: specBarcodes,
           basicUnit: _form['unit']?.toString() ?? '',
+          productName: _form['name']?.toString().trim() ?? '',
+          mainPrices: _mainPrices,
         ),
       ),
     );
@@ -2186,7 +2481,10 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       setState(() {
         final list = List<Map<String, dynamic>>.from(_packList);
         list.add(result);
+        _enforceDefaultPackUnit(list, result);
         _form['packpage'] = list;
+        // 新增包装单位后刷新业务单位可选范围
+        _syncBusinessUnits(notify: false);
       });
     }
   }
@@ -2213,19 +2511,31 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
           mainBarcode: _form['barcode']?.toString().trim() ?? '',
           specBarcodes: specBarcodes,
           basicUnit: _form['unit']?.toString() ?? '',
+          productName: _form['name']?.toString().trim() ?? '',
+          mainPrices: _mainPrices,
         ),
       ),
     );
     if (result != null && mounted) {
       setState(() {
+        final oldRow = index < _packList.length ? _packList[index] : null;
         final list = List<Map<String, dynamic>>.from(_packList);
         // 删除标记：移除该项
         if (result['_delete'] == true) {
           list.removeAt(index);
         } else {
           list[index] = result;
+          _enforceDefaultPackUnit(list, result);
+          // 编辑保存后行对象被替换：把业务单位记录的来源行转移到新对象，保证行改名可跟随
+          if (oldRow != null) {
+            for (final entry in _businessUnitSelections.entries) {
+              if (identical(entry.value.row, oldRow)) entry.value.row = result;
+            }
+          }
         }
         _form['packpage'] = list;
+        // 包装单位变更/删除后刷新业务单位（行改名跟随、行被删除回落基本单位）
+        _syncBusinessUnits(notify: false);
       });
     }
   }
@@ -2496,6 +2806,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       final list = List<Map<String, dynamic>>.from(_packlinkpro);
       if (index >= 0 && index < list.length) list[index] = _packlinkproDefaultRow();
       _form['packlinkpro'] = list;
+      // 来源行被替换为默认空行：业务单位按引用解析失败，回落基本单位
+      _syncBusinessUnits(notify: false);
     });
   }
 
@@ -2530,6 +2842,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
         list.add(row);
       }
       _form['packlinkpro'] = list;
+      // 关联商品行对象被替换：业务单位来源引用失效，按当前值重新解析
+      _syncBusinessUnits(notify: false);
     });
   }
 
@@ -2715,9 +3029,12 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
             Expanded(
               child: TextField(
                 controller: _barcodeController,
+                focusNode: _barcodeFocusNode,
                 keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.done,
                 readOnly: _isReadOnly,
                 enabled: !_isReadOnly,
+                onSubmitted: (_) => _barcodeEnter(),
                 style: TextStyle(
                     fontSize: 14,
                     color: _isReadOnly ? const Color(0xFF9CA3AF) : const Color(0xFF111827)),
@@ -2922,6 +3239,130 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     );
   }
 
+  /// 业务单位行（采购/批发/配送）：仅可选择"基本单位 + 已有包装单位"
+  Widget _buildBusinessUnitRow({
+    required String label,
+    required String field,
+    required String title,
+  }) {
+    return _buildSelectRow(
+      label: label,
+      value: _form[field]?.toString() ?? '',
+      enabled: !_isReadOnly,
+      required: true,
+      labelWidth: 90,
+      onTap: () => _pickBusinessUnit(field, title),
+    );
+  }
+
+  /// 选择业务单位（底部抽屉，选项来自基本单位与包装单位）
+  Future<void> _pickBusinessUnit(String field, String title) async {
+    if (_isReadOnly) return;
+    final options = _businessUnitOptions;
+    if (options.isEmpty) {
+      Toast.show('请先输入或选择商品单位');
+      return;
+    }
+    final current = _form[field]?.toString() ?? '';
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          height: MediaQuery.of(ctx).size.height * 0.5,
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Column(
+            children: [
+              SizedBox(
+                height: 50,
+                child: Row(
+                  children: [
+                    const SizedBox(width: 48),
+                    Expanded(
+                      child: Text(
+                        title,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF111827),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 48,
+                      child: Center(
+                        child: GestureDetector(
+                          onTap: () => Navigator.pop(ctx),
+                          child: const Icon(Icons.close, size: 22, color: Color(0xFF9CA3AF)),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1, color: Color(0xFFE5E7EB)),
+              Expanded(
+                child: ListView.builder(
+                  padding: EdgeInsets.zero,
+                  itemCount: options.length,
+                  itemBuilder: (_, index) {
+                    final unit = options[index];
+                    final isSelected = unit == current;
+                    return GestureDetector(
+                      onTap: () => Navigator.pop(ctx, unit),
+                      behavior: HitTestBehavior.opaque,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        decoration: const BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(color: Color(0xFFE5E7EB), width: 0.5),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                              size: 22,
+                              color: isSelected ? const Color(0xFF006EFF) : const Color(0xFFD1D5DB),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                unit,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  color: isSelected
+                                      ? const Color(0xFF006EFF)
+                                      : const Color(0xFF111827),
+                                  fontWeight: isSelected ? FontWeight.w500 : FontWeight.normal,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (selected != null && mounted) {
+      setState(() => _form[field] = selected);
+      // 改选后按新值重建来源行引用（对齐后台 watch：值变化即按名称重新匹配来源）
+      _syncBusinessUnits();
+    }
+  }
+
   /// 品牌行（左侧输入框 + 右侧选择品牌按钮，对齐小程序 more.vue）
   Widget _buildBrandRow() {
     return Padding(
@@ -3075,6 +3516,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
                           setState(() => _form['itemtype'] = value);
                           // 商品类型切换后 Tab 数量可能变化（itemtype=9 → 包装配置 Tab）
                           _syncTabController();
+                          // 包装单位来源在包装配置行/包装单位行之间切换，需重新解析业务单位来源
+                          _syncBusinessUnits();
                         }),
                 behavior: HitTestBehavior.opaque,
                 child: Row(
@@ -3190,8 +3633,172 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
       context,
       MaterialPageRoute(builder: (_) => const QrCodeScannerPage()),
     );
-    if (code != null && code.isNotEmpty && mounted) {
-      setState(() => _barcodeController.text = code);
+    if (code == null || code.isEmpty || !mounted) return;
+    if (code.length != 13) {
+      Toast.show('请扫描13位条码');
+      return;
+    }
+    setState(() => _barcodeController.text = code);
+    // 扫码结果统一走条码回车处理（查重 + 云商品库回填，对齐后台 barcodeEnter）
+    _barcodeEnter();
+  }
+
+  /// 读取 loginParamResp 登录参数配置
+  Map<String, dynamic> _readLoginCfg() {
+    try {
+      final cfgStr = SpUtil.getString(Constant.loginParamResp) ?? '';
+      if (cfgStr.isNotEmpty) {
+        return jsonDecode(cfgStr) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  /// 仅条码建档（为1时不做条码重复判断，对齐后台 codeOnlyBarcodeRecord）
+  int get _codeOnlyBarcodeRecord =>
+      int.tryParse(_readLoginCfg()['codeOnlyBarcodeRecord']?.toString() ?? '') ?? 0;
+
+  /// 云商品库开关（后台设置云端保存，端侧只读判断）
+  bool get _cloudProductLibraryEnabled =>
+      (_readLoginCfg()['cloudProductLibraryFlag']?.toString() ?? '0') == '1';
+
+  /// 条码回车处理：条码重复判断 + 云商品库信息回填（仅新增商品时处理，对齐后台 barcodeEnter）
+  Future<void> _barcodeEnter() async {
+    if (_isEdit) return;
+    final barcode = _barcodeController.text.trim();
+    if (barcode.length != 13) return;
+    // 条码重复弹窗已打开时不重复处理
+    if (_duplicateDialogVisible) return;
+    try {
+      final res = await request(HttpApi.productPdBarcode, {'barcode': barcode});
+      if (!mounted) return;
+      // 异步返回时条码已变更或弹窗已打开（失焦查重先弹出）时放弃本次处理
+      if (_barcodeController.text.trim() != barcode || _duplicateDialogVisible) return;
+      final data = res['data'];
+      final duplicateBarcode =
+          data is Map<String, dynamic> ? (data['barcode']?.toString() ?? '') : '';
+      // codeOnlyBarcodeRecord 为1时不做条码重复判断
+      if (duplicateBarcode.isNotEmpty && _codeOnlyBarcodeRecord != 1) {
+        Toast.show('商品条码重复，请修改');
+        return;
+      }
+      // 云商品库未开启时不查询
+      if (!_cloudProductLibraryEnabled) return;
+      await _fetchCloudProduct(barcode);
+    } catch (_) {
+      // 请求异常已由拦截器统一提示
+    }
+  }
+
+  /// 条码失焦检查重复（仅新增商品时校验，重复时弹出选择弹窗，对齐后台 checkBarcodeDuplicate）
+  Future<void> _checkBarcodeDuplicate() async {
+    if (_isEdit) return;
+    if (_codeOnlyBarcodeRecord == 1) return;
+    final barcode = _barcodeController.text.trim();
+    if (barcode.isEmpty) return;
+    if (_duplicateDialogVisible) return;
+    try {
+      final res = await request(HttpApi.productPdBarcode, {'barcode': barcode});
+      if (!mounted) return;
+      // 异步返回时条码已变更或弹窗已打开时放弃
+      if (_barcodeController.text.trim() != barcode || _duplicateDialogVisible) return;
+      final data = res['data'];
+      if (data is Map<String, dynamic> && (data['barcode']?.toString() ?? '').isNotEmpty) {
+        await _showDuplicateBarcodeDialog(data);
+      }
+    } catch (_) {
+      // 请求异常已由拦截器统一提示
+    }
+  }
+
+  /// 弹出条码重复选择弹窗（对齐后台 duplicateBarcodeDialog）
+  Future<void> _showDuplicateBarcodeDialog(Map<String, dynamic> product) async {
+    final barcode = product['barcode']?.toString() ?? '';
+    final name = product['name']?.toString() ?? '';
+    _duplicateDialogVisible = true;
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('提示'),
+        content: Text('已存在条码为【$barcode】的商品：'
+            '【$barcode】【$name】\n\n'
+            '请选择对应操作\n\n'
+            '【是】建立同码新商品 【否】修改原商品 【取消】重新输入条码'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, 'yes'), child: const Text('是')),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'no'), child: const Text('否')),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'cancel'), child: const Text('取消')),
+        ],
+      ),
+    );
+    _duplicateDialogVisible = false;
+    if (!mounted || action == null) return;
+    if (action == 'yes') {
+      _handleDuplicateBarcodeNew();
+    } else if (action == 'no') {
+      _handleDuplicateBarcodeEdit(product);
+    } else {
+      // 取消：清空条码重新输入并聚焦
+      setState(() => _barcodeController.clear());
+      _barcodeFocusNode.requestFocus();
+    }
+  }
+
+  /// 条码重复弹窗-是：建立同码新商品（重置表单保留分类/供应商/单位，原条码作为自编码并生成新条码）
+  void _handleDuplicateBarcodeNew() {
+    final barcode = _barcodeController.text.trim();
+    final selltype = _form['selltype'];
+    _resetForm(keepType: true, keepSupplier: true, keepUnit: true);
+    // 原条码作为自编码，经销方式保留
+    _codeController.text = barcode;
+    setState(() {
+      _form['code'] = barcode;
+      _form['selltype'] = selltype;
+    });
+    _autoGenerateBarcode(isSc: false);
+  }
+
+  /// 条码重复弹窗-否：跳转修改原商品
+  void _handleDuplicateBarcodeEdit(Map<String, dynamic> product) {
+    final productid = product['productid']?.toString() ?? '';
+    if (productid.isEmpty) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => CommodityAddPage(productData: {'productid': productid})),
+    );
+  }
+
+  /// 云商品库查询并回填商品信息（对齐后台 barcodeEnter 云接口逻辑）
+  Future<void> _fetchCloudProduct(String barcode) async {
+    final date = DateTime.now().millisecondsSinceEpoch.toString();
+    const sdogid = '137966';
+    final sparm1 = md5.convert(utf8.encode(sdogid)).toString();
+    final sparm2 = md5.convert(utf8.encode(barcode + date)).toString();
+    final sparm3 = date.substring(0, 10);
+    final url = 'http://zc.bypos.net/byGoodsService/byMessage.asmx/GetGoodsinfo'
+        '?sdogid=$sdogid&regnum=1&barcode=$barcode'
+        '&sparm1=$sparm1&sparm2=$sparm2&sparm3=$sparm3&sparm4=&barcodetype=yunpos';
+    try {
+      final res = await request(HttpApi.httpUtilGetGet, {'url': url});
+      if (!mounted) return;
+      // 云商品库已关闭或条码已变更时放弃回填
+      if (!_cloudProductLibraryEnabled || _barcodeController.text.trim() != barcode) return;
+      final data = res['data'];
+      if (data is! Map<String, dynamic>) return;
+      if ((data['retmsg']?.toString() ?? '') == '获取商品信息失败,商品条码不存在!') return;
+      setState(() {
+        _inpriceController.text = MathUtils.formatDecimal(2, data['inprice'] ?? 0);
+        _sellpriceController.text = MathUtils.formatDecimal(2, data['sellprice'] ?? 0);
+        _nameController.text = data['item_name']?.toString() ?? '';
+        _unitController.text = data['unit_no']?.toString() ?? '';
+        _sizeController.text = data['item_size']?.toString() ?? '';
+        _homeController.text = data['item_area']?.toString() ?? '';
+      });
+      // 回填价格后重新计算毛利率（对齐后台 changeName + priceBlur 联动）
+      _jsGrossrate();
+    } catch (_) {
+      // 请求异常已由拦截器统一提示
     }
   }
 
@@ -3689,6 +4296,37 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
     );
   }
 
+  /// 只读文本展示行（如最后入库/销售时间，对齐小程序 more.vue disabled 字段）
+  Widget _buildReadOnlyField({
+    required String label,
+    required String value,
+    double labelWidth = 90,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: SizedBox(
+        height: 24,
+        child: Row(
+          children: [
+            SizedBox(
+              width: labelWidth,
+              child: Text(label,
+                  style: const TextStyle(
+                      fontSize: 14, color: Color(0xFF374151), fontWeight: FontWeight.w500)),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                value,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF9CA3AF)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildDropdown({
     required String label,
     required int value,
@@ -3957,7 +4595,8 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
 
   /// 经销方式行（只读显示，联营/扣率代销/租赁时右侧显示联营比例输入框）
   Widget _buildSelltypeRow() {
-    final selltype = (_form['selltype'] ?? 1) as int;
+    // 空值/异常值兜底为购销，避免强类型转换抛错
+    final selltype = _parseIntOr(_form['selltype'], 1);
     final selltypeLabel = _sellTypeOptions.firstWhere((o) => o['value'] == selltype,
         orElse: () => _sellTypeOptions.first)['label'] as String;
     // selltype 2=联营, 4=扣率代销, 5=租赁 时显示联营比例
@@ -4015,6 +4654,15 @@ class _CommodityAddPageState extends State<CommodityAddPage> with TickerProvider
   }
 }
 
+/// 业务单位选中来源：row 为选中的包装单位行/包装配置行引用（null=跟随基本单位）
+class _BusinessUnitRef {
+  _BusinessUnitRef(this.row, this.unit);
+  Map<String, dynamic>? row;
+
+  /// 上次同步后写入业务单位字段的值，用于识别用户改选并重建来源
+  String unit;
+}
+
 /// 包装单位列表项
 class _PackageItem extends StatelessWidget {
   const _PackageItem({
@@ -4037,6 +4685,9 @@ class _PackageItem extends StatelessWidget {
     final String barcode = pack['sbarcode']?.toString() ?? pack['packbarcode']?.toString() ?? '';
     final String unit = pack['sunit']?.toString() ?? '';
     final String num = pack['packagenum']?.toString() ?? pack['packrate']?.toString() ?? '';
+    // 与后台包装名称列一致：优先展示包装名称，未维护时回退商品名称
+    final String packname = pack['packname']?.toString() ?? '';
+    final String title = packname.isNotEmpty ? packname : productName;
 
     return GestureDetector(
       onTap: onTap,
@@ -4055,7 +4706,7 @@ class _PackageItem extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(productName.isNotEmpty ? productName : '-',
+                  Text(title.isNotEmpty ? title : '-',
                       style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
                   if (barcode.isNotEmpty)
                     Padding(

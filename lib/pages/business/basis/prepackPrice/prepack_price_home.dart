@@ -32,6 +32,9 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
 
   final TextEditingController _searchController = TextEditingController();
 
+  /// 搜索框焦点（扫码枪连续扫码：每次扫码/搜索/弹层关闭后把光标交回搜索框）
+  final FocusNode _searchFocusNode = FocusNode();
+
   /// 预包装商品列表
   List<Map<String, dynamic>> _dataList = [];
 
@@ -41,15 +44,29 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
   /// 蓝牙打印进行中（全屏 loading 弹窗控制）
   bool _blePrinting = false;
 
+  /// 13 位条码格式提示文案（对齐小程序 onLoad 与 print 两处提示）
+  static const String _ean13NotSupportTip = '门店条码称使用 13 位条码格式，不支持预包装商品改价打印';
+
   @override
   void initState() {
     super.initState();
+    // 进入页面即聚焦搜索框（PDA 扫码枪可直接扫码录入）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _focusSearchNow();
+      }
+    });
+    // 进入页面即提示（对齐小程序 onLoad）
+    if (_isEan13ScaleFormat) {
+      Toast.show(_ean13NotSupportTip);
+    }
     _loadPrintSettings();
   }
 
   @override
   void dispose() {
     _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
@@ -193,7 +210,7 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
           final existRow = _dataList[existIdx];
           final existQty = double.tryParse(existRow['packQty']?.toString() ?? '') ?? 0;
           final itemQty = double.tryParse(item['packQty']?.toString() ?? '') ?? 0;
-          final newQty = _round2(existQty + itemQty);
+          final newQty = _roundQty(existQty + itemQty);
           final sellprice = double.tryParse(existRow['sellprice']?.toString() ?? '') ?? 0;
           existRow['packQty'] = newQty;
           // 扫码相关标记正确传递和保留
@@ -218,7 +235,11 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
       }
       // 提示模式（flag == 0）：已存在时仅提示，不执行后续操作
       Toast.show('该商品已经录入');
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      // 扫码枪连续扫码：搜索结束后把光标交回搜索框（详情抽屉/弹窗开着时由各自的关闭回调再聚焦）
+      _refocusSearch();
+    }
   }
 
   /// 同码多条：将所有匹配商品按重复录入策略批量加入列表，并默认打开首条新增/更新项详情抽屉
@@ -243,7 +264,7 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
           final existRow = _dataList[existIdx];
           final existQty = double.tryParse(existRow['packQty']?.toString() ?? '') ?? 0;
           final itemQty = double.tryParse(item['packQty']?.toString() ?? '') ?? 0;
-          final newQty = _round2(existQty + itemQty);
+          final newQty = _roundQty(existQty + itemQty);
           final sellprice = double.tryParse(existRow['sellprice']?.toString() ?? '') ?? 0;
           existRow['packQty'] = newQty;
           // 扫码相关标记正确传递和保留
@@ -285,6 +306,13 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
     return int.tryParse(v?.toString() ?? '') ?? 0;
   }
 
+  /// 门店条码称是否为 13 位条码格式（对齐小程序 loginParamResp.wbBarcodeFormatInt == 1 || == 2，
+  /// 1=13位重量码、2=13位金额码，此时不支持预包装商品改价打印）
+  bool get _isEan13ScaleFormat {
+    final v = double.tryParse(_readLoginParamResp()['wbBarcodeFormatInt']?.toString() ?? '');
+    return v == 1 || v == 2;
+  }
+
   /// 扫码搜索（对齐小程序 scanFn：尝试解析秤码后按商品码查询）
   Future<void> _scanBarcode() async {
     final result = await Navigator.push<String>(
@@ -293,19 +321,11 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
     );
     if (result == null || result.isEmpty) {
       Toast.show('请扫描正确条码');
+      // 取消扫码返回后会丢失焦点，恢复给搜索框便于继续扫码
+      _refocusSearch();
       return;
     }
     final scaleInfo = parseScaleBarcode(result);
-    // ===== 调试日志（定位秤码解析）=====
-    final cfg = _readLoginParamResp();
-    debugPrint('[扫码] 原始条码="$result" 长度=${result.length}');
-    debugPrint('[扫码] 配置: webBarcodeInt=${cfg['webBarcodeInt']} '
-        'wbBarcodeFormatInt=${cfg['wbBarcodeFormatInt']} '
-        'webWeightInt=${cfg['webWeightInt']} '
-        'webAmtInt=${cfg['webAmtInt']}');
-    debugPrint('[扫码] 解析结果: type=${scaleInfo?.type} '
-        'productCode=${scaleInfo?.productCode} '
-        'qty=${scaleInfo?.qty} amount=${scaleInfo?.amount}');
     _searchController.text = scaleInfo?.productCode ?? result;
     _searchProduct(scaleInfo);
   }
@@ -360,48 +380,46 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
     return item;
   }
 
-  /// 根据秤码解析结果设置数量/金额（对齐小程序 searchProduct 中秤码分支）
+  /// 根据秤码解析结果设置数量/金额（对齐小程序 applyScaleInfo）
   void _applyScaleInfo(Map<String, dynamic> item, ScaleBarcodeResult? scaleInfo) {
     if (scaleInfo == null) {
-      debugPrint('[秤码] _applyScaleInfo 跳过：scaleInfo=null（非秤码，数量取商品 packagenum）');
       return;
     }
     final sellprice = double.tryParse(item['sellprice']?.toString() ?? '') ?? 0;
     final barcode = item['barcode']?.toString() ?? '';
 
     if (scaleInfo.type == 'weight') {
-      // 重量码：直接设置包装数量（对齐小程序 scaleInfo.qty || 1：null/0/NaN 均兜底为 1）
+      // 重量码：直接使用条码上的数量（已按重量精度还原小数位），条码无数量时保持商品 packagenum
       final parsedQty = scaleInfo.qty;
-      debugPrint('[秤码] weight 分支: parsedQty=$parsedQty sellprice=$sellprice');
-      final qty = (parsedQty == null || parsedQty.isNaN || parsedQty <= 0) ? 1.0 : parsedQty;
+      final qty = (parsedQty == null || parsedQty.isNaN)
+          ? (double.tryParse(item['packQty']?.toString() ?? '') ?? 1)
+          : parsedQty;
       item['packQty'] = qty;
-      item['qtyFromScan'] = parsedQty != null && !parsedQty.isNaN && parsedQty > 0;
-      item['packAmount'] = _round2(sellprice * qty);
-      item['packBarcode'] = generatePackageCode(qty, item['packAmount'] as double, barcode);
-      item['packDiscount'] = _calcDiscount(sellprice, qty, item['packAmount'] as double);
+      item['qtyFromScan'] = parsedQty != null && !parsedQty.isNaN;
+      // 18 位码带金额段：直接使用条码上的金额，避免按商品价重算产生误差；
+      // 无金额段：开启“按秤价格优先”时用秤码单价，否则用商品零售价
+      final parsedAmount = scaleInfo.amount;
+      final amount = (parsedAmount != null && !parsedAmount.isNaN)
+          ? _round2(parsedAmount)
+          : _round2((scaleInfo.price ?? sellprice) * qty);
+      item['packAmount'] = amount;
+      item['packBarcode'] = generatePackageCode(qty, amount, barcode);
+      item['packDiscount'] = _calcDiscount(sellprice, qty, amount);
     } else if (scaleInfo.type == 'amount') {
-      // 金额码：根据金额和单价反算数量（对齐小程序 packQty = amount / sellprice）
+      // 金额码：根据金额和单价反算数量
       final amount = scaleInfo.amount ?? 0;
-      debugPrint('[秤码] amount 分支: amount=$amount sellprice=$sellprice');
       if (sellprice > 0) {
         item['packQty'] = _round2(amount / sellprice);
         item['packAmount'] = amount;
         item['qtyFromScan'] = true;
-        debugPrint('[秤码] amount 反算完成: packQty=${item['packQty']} '
-            'packAmount=${item['packAmount']} qtyFromScan=true');
       } else {
         // sellprice<=0 无法反算，数量保持商品 packagenum（与小程序一致）
         item['packAmount'] = amount;
-        debugPrint('[秤码] amount 分支: sellprice<=0 无法反算数量，packQty 保持 ${item['packQty']}');
       }
-      item['packBarcode'] = generatePackageCode(
-          double.tryParse(item['packQty']?.toString() ?? '') ?? 1,
-          double.tryParse(item['packAmount']?.toString() ?? '') ?? 0,
-          barcode);
-      item['packDiscount'] = _calcDiscount(
-          sellprice,
-          double.tryParse(item['packQty']?.toString() ?? '') ?? 1,
-          double.tryParse(item['packAmount']?.toString() ?? '') ?? 0);
+      final qty = double.tryParse(item['packQty']?.toString() ?? '') ?? 1;
+      final packAmount = double.tryParse(item['packAmount']?.toString() ?? '') ?? 0;
+      item['packBarcode'] = generatePackageCode(qty, packAmount, barcode);
+      item['packDiscount'] = _calcDiscount(sellprice, qty, packAmount);
     }
   }
 
@@ -412,6 +430,11 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
 
   double _round2(double value) {
     return (value * 100).roundToDouble() / 100;
+  }
+
+  /// 包装数量四舍五入（小数位跟随后台条码秤重量精度 webWeightInt）
+  double _roundQty(double value) {
+    return double.parse(value.toStringAsFixed(getScaleQtyDigits()));
   }
 
   // ─── 商品详情编辑抽屉 ───
@@ -425,12 +448,19 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
     if (updated != null && mounted) {
       setState(() => _dataList[index] = updated);
     }
+    // 抽屉关闭后把光标交回搜索框，支持扫码枪连续扫码
+    _refocusSearch();
   }
 
   // ─── 打印 ───
 
   /// 执行打印（对齐小程序 print 三分支）
   Future<void> _print() async {
+    // 打印前提示（对齐小程序 print：仅提示，不拦截后续流程）
+    if (_isEan13ScaleFormat) {
+      Toast.show(_ean13NotSupportTip);
+      return;
+    }
     if (_dataList.isEmpty) {
       Toast.show('至少选择一条明细');
       return;
@@ -513,7 +543,8 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
     if (!connected && mac.isNotEmpty && mounted) {
       _showBleLoading('正在连接打印机...');
       try {
-        connected = await GPrinter.connect(mac);
+        connected = await GPrinter.connect(mac,
+            name: _printSettings['lableBluetoothCode']?.toString() ?? '');
       } catch (_) {
         connected = false;
       }
@@ -571,6 +602,8 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
     } finally {
       _blePrinting = false;
       _hideBleLoading();
+      // 打印结束后把光标交回搜索框，方便继续扫码
+      _refocusSearch();
     }
   }
 
@@ -624,7 +657,10 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
         content: Text(content, style: const TextStyle(fontSize: 14)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _refocusSearch();
+            },
             child: const Text('取消'),
           ),
           TextButton(
@@ -638,6 +674,8 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
               if (mounted) {
                 _loadPrintSettings();
               }
+              // 设置页返回后把光标交回搜索框
+              _refocusSearch();
             },
             child: const Text('去设置', style: TextStyle(color: _primaryColor)),
           ),
@@ -654,13 +692,17 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
         content: Text(content, style: const TextStyle(fontSize: 14)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _refocusSearch();
+            },
             child: const Text('取消'),
           ),
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
               onConfirm();
+              _refocusSearch();
             },
             child: const Text('确定', style: TextStyle(color: _primaryColor)),
           ),
@@ -702,7 +744,10 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _refocusSearch();
+            },
             child: const Text('取消'),
           ),
           TextButton(
@@ -722,6 +767,7 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
                 }
               });
               Navigator.pop(ctx);
+              _refocusSearch();
             },
             child: const Text('确定', style: TextStyle(color: _primaryColor)),
           ),
@@ -731,6 +777,35 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
   }
 
   // ─── 工具方法 ───
+
+  /// 把光标重新交回搜索框（扫码枪连续扫码依赖焦点停留在输入框）
+  ///
+  /// 弹层 route 还开着或刚 pop 尚在退场时 `isCurrent` 仍为 false，
+  /// 此时不抢焦点，延时 300ms 再补一次（覆盖弹层退场动画），避免与弹层争焦点。
+  void _refocusSearch() {
+    if (!mounted) {
+      return;
+    }
+    final bool isCurrent = ModalRoute.of(context)?.isCurrent ?? false;
+    if (isCurrent) {
+      _focusSearchNow();
+      return;
+    }
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (!mounted) {
+        return;
+      }
+      final bool current = ModalRoute.of(context)?.isCurrent ?? false;
+      if (current) {
+        _focusSearchNow();
+      }
+    });
+  }
+
+  /// 立即聚焦搜索框（扫码枪连续扫码依赖焦点停留在输入框）
+  void _focusSearchNow() {
+    _searchFocusNode.requestFocus();
+  }
 
   int _clampQty(dynamic val) {
     final qty = int.tryParse(val?.toString() ?? '') ?? 1;
@@ -795,6 +870,7 @@ class _PrepackPriceHomePageState extends State<PrepackPriceHomePage> {
                 builder: (context, value, _) {
                   return TextField(
                     controller: _searchController,
+                    focusNode: _searchFocusNode,
                     onSubmitted: (_) => _searchProduct(),
                     decoration: InputDecoration(
                       hintText: '输入条码/品名/自编码',
@@ -966,7 +1042,7 @@ class _PrepackCard extends StatelessWidget {
     final unit = item['unit']?.toString() ?? '';
     final barcode = item['barcode']?.toString() ?? '';
     final sellprice = MathUtils.formatDecimal(2, item['sellprice'] ?? '0');
-    final packQty = MathUtils.formatDecimal(1, item['packQty'] ?? 1);
+    final packQty = formatScaleQty(item['packQty'] ?? 1);
     final packDiscount = MathUtils.formatDecimal(2, item['packDiscount'] ?? 100);
     final packAmount = MathUtils.formatDecimal(2, item['packAmount'] ?? 0);
     final packBarcode = item['packBarcode']?.toString() ?? '';

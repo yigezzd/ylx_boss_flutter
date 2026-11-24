@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
+import 'package:flutter_deer/push/push_service.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/res/resources.dart';
 import 'package:flutter_deer/routers/fluro_navigator.dart';
@@ -204,6 +205,8 @@ class _LoginPageState extends State<LoginPage> {
       SpUtil.putString(Constant.store, json.encode(data['store'] ?? {}));
       SpUtil.putString(Constant.rolemap, json.encode(data['rolemap'] ?? {}));
       SpUtil.putString(Constant.sysStoreAccount, json.encode(data['sysStoreAccount'] ?? {}));
+      // 席位信息（对齐 boss 项目登录页：登录成功后缓存 sysSeat，供业务页版本/席位判断）
+      SpUtil.putString(Constant.sysSeat, json.encode(data['sysSeat'] ?? {}));
       SpUtil.putString(Constant.allLoginData, json.encode(data));
       SpUtil.putString(Constant.accessToken, data['token']?.toString() ?? '');
       // loginParamResp 在 data 内部
@@ -238,6 +241,8 @@ class _LoginPageState extends State<LoginPage> {
         _saveOrClearCredentials();
         // 登录成功后记录设备基础信息（对齐 smdcapp LoginActivity: JsonWriter.initLogInfo）
         FileLogWriter.instance.logDeviceInfo();
+        // 登录成功后绑定推送标识（别名=用户，标签=门店），用于精准推送
+        PushService.instance.bindUser();
         Toast.show('登录成功');
         NavigatorUtils.push(context, Routes.home, clearStack: true);
       }

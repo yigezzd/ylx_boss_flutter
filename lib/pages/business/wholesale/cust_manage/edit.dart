@@ -7,6 +7,7 @@ import 'package:flutter_deer/pages/business/wholesale/select/select_salesperson.
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 
 class CustManageEditPage extends StatefulWidget {
   const CustManageEditPage({super.key, this.billData});
@@ -70,6 +71,9 @@ class _CustManageEditPageState extends State<CustManageEditPage>
   List<Map<String, dynamic>>? _custTypeList;
   final bool _custTypeLoading = false;
 
+  /// 未保存修改比对基线（进入页面/加载完成/保存完成后更新）
+  String _formSnapshot = '';
+
   @override
   void initState() {
     super.initState();
@@ -81,6 +85,8 @@ class _CustManageEditPageState extends State<CustManageEditPage>
     } else {
       _generateCode();
     }
+    // 新增模式：默认值回填后建立基线，未改动直接返回不弹窗
+    _refreshSnapshot();
     logEnter();
   }
 
@@ -115,6 +121,8 @@ class _CustManageEditPageState extends State<CustManageEditPage>
       final data = result['data'];
       if (data is String && data.isNotEmpty) {
         _codeCtrl.text = data;
+        // 自动生成编码后重建基线，避免误判为未保存修改
+        _refreshSnapshot();
       }
     });
   }
@@ -177,7 +185,65 @@ class _CustManageEditPageState extends State<CustManageEditPage>
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
+  }
+
+  // ═══ 返回与未保存修改检测 ═══
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _codeCtrl.text,
+      _nameCtrl.text,
+      _linkmanCtrl.text,
+      _mobileCtrl.text,
+      _faxCtrl.text,
+      _addressCtrl.text,
+      _discountCtrl.text,
+      _wxminpayrateCtrl.text,
+      _remarkCtrl.text,
+      _invoicetitleCtrl.text,
+      _taxidCtrl.text,
+      _phoneCtrl.text,
+      _linkaddressCtrl.text,
+      _bankCtrl.text,
+      _bankaccountCtrl.text,
+      _initamtCtrl.text,
+      _advanceCtrl.text,
+      _amountowedCtrl.text,
+      _debtamtCtrl.text,
+      _custtypeid,
+      _custareaid,
+      _salesid,
+      _pricetype,
+      _stopflag.toString(),
+      _wxcustorderflag.toString(),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示；保存成功由 _save 内部返回上一页
+      _save();
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
   }
 
   Future<void> _save() async {
@@ -281,7 +347,7 @@ class _CustManageEditPageState extends State<CustManageEditPage>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -290,7 +356,7 @@ class _CustManageEditPageState extends State<CustManageEditPage>
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? '编辑客户' : '新增客户',
@@ -353,6 +419,13 @@ class _CustManageEditPageState extends State<CustManageEditPage>
                 ),
               ],
             ),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 

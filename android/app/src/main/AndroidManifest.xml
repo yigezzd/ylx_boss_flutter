@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- 极光推送：Android 13+ 通知权限 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
     <!-- 佳博蓝牙打印机：扫描/连接权限 -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
@@ -50,6 +52,12 @@
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
+
+            <!-- 极光推送：关闭 Flutter 深链接处理，避免应用被杀进程后点击厂商通道推送时
+                 intent 的 data 被误当作 Flutter 路由解析，导致打开白屏 -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="false" />
             
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

@@ -44,12 +44,14 @@ class _InventorySearchListPageState extends State<InventorySearchListPage> {
   String _filterSupname = '';
   String _filterBrandname = '';
   int _qtyflag = 1; // 1=显示零库存 0=不显示
+  int _costpriceflag = 1; // cost view permission (align lxAss search.vue user.costpriceflag)
   List<Map<String, dynamic>> _filterTypelist = []; // [{typeid, name}]
 
   @override
   void initState() {
     super.initState();
     _loadDefaultStore();
+    _loadUserFlags();
     _scrollController.addListener(_onScroll);
     _loadData();
   }
@@ -72,6 +74,17 @@ class _InventorySearchListPageState extends State<InventorySearchListPage> {
         _activeStoreId = storeId;
         _storeName = storeName;
         _sids = storeId.isNotEmpty ? [int.tryParse(storeId) ?? 0] : [];
+      }
+    } catch (_) {}
+  }
+
+  /// Read cost view permission from login user (align lxAss search.vue user.costpriceflag)
+  void _loadUserFlags() {
+    try {
+      final String userStr = SpUtil.getString(Constant.user) ?? '';
+      if (userStr.isNotEmpty) {
+        final Map<String, dynamic> userMap = jsonDecode(userStr) as Map<String, dynamic>;
+        _costpriceflag = int.tryParse(userMap['costpriceflag']?.toString() ?? '1') ?? 1;
       }
     } catch (_) {}
   }
@@ -678,6 +691,7 @@ class _InventorySearchListPageState extends State<InventorySearchListPage> {
                   return RepaintBoundary(
                     child: _StockCard(
                       item: _list[index],
+                      costpriceflag: _costpriceflag,
                       onTap: () {
                         Navigator.push<bool>(
                           context,
@@ -698,9 +712,12 @@ class _InventorySearchListPageState extends State<InventorySearchListPage> {
 
 /// 列表卡片
 class _StockCard extends StatelessWidget {
-  const _StockCard({required this.item, required this.onTap});
+  const _StockCard({required this.item, required this.onTap, required this.costpriceflag});
   final Map<String, dynamic> item;
   final VoidCallback onTap;
+
+  /// Cost view permission (align lxAss search.vue user.costpriceflag): show **** when != 1
+  final int costpriceflag;
 
   static String _formatDecimal(int fractionDigits, dynamic value) {
     final num v = value is num ? value : (num.tryParse(value?.toString() ?? '0') ?? 0);
@@ -757,7 +774,7 @@ class _StockCard extends StatelessWidget {
                   ),
                   Expanded(
                     child: Text(
-                      '库存金额：${_formatDecimal(3, sumamt)}',
+                      '库存金额：${costpriceflag == 1 ? _formatDecimal(3, sumamt) : '****'}',
                       style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
                       overflow: TextOverflow.ellipsis,
                     ),

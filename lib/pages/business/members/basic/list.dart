@@ -41,6 +41,10 @@ class _MembersListPageState extends State<MembersListPage> {
   String _storeId = '';
   String _storeName = '';
 
+  // 会员管理配置(vipflag)：统一管理=1（默认）发行机构可选"自己/全部门店"；
+  // 独立管理=3 固定当前机构（数据隔离，不可切换）
+  bool _isUnifyVip = true;
+
   @override
   void initState() {
     super.initState();
@@ -65,6 +69,8 @@ class _MembersListPageState extends State<MembersListPage> {
         final Map<String, dynamic> storeMap = jsonDecode(storeStr) as Map<String, dynamic>;
         _storeId = storeMap['id']?.toString() ?? '';
         _storeName = storeMap['name']?.toString() ?? '';
+        // vipflag 缺失时兼容统一管理（对齐 Vue (store.vipflag ?? 1) == 1）
+        _isUnifyVip = (storeMap['vipflag']?.toString() ?? '1') == '1';
       }
     } catch (_) {}
   }
@@ -138,9 +144,11 @@ class _MembersListPageState extends State<MembersListPage> {
 
   // ── 机构选择（对齐 Vue jumpPge → selectStore）──
   Future<void> _selectStore() async {
+    // 独立管理门店：发行机构固定当前机构，禁止切换（数据隔离）
+    if (!_isUnifyVip) return;
     final result = await SelectStorePage.show(
       context,
-      showAll: true,
+      showAll: _isUnifyVip,
       initialSelectedId: _storeId,
     );
     if (result != null && mounted) {
@@ -213,15 +221,18 @@ class _MembersListPageState extends State<MembersListPage> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         children: [
-          // 机构按钮（对齐 Vue store-btn）
+          // 机构按钮（对齐 Vue store-btn）——独立管理时灰显、隐藏箭头且不可切换
           GestureDetector(
             onTap: _selectStore,
             child: Container(
               width: 115,
               height: 40,
-              padding: const EdgeInsets.only(left: 10, right: 8),
+              padding: EdgeInsets.only(left: 10, right: _isUnifyVip ? 8 : 10),
               decoration: BoxDecoration(
-                border: Border.all(color: const Color(0xFFDEDEDE)),
+                color: _isUnifyVip ? Colors.white : const Color(0xFFF5F5F5),
+                border: Border.all(
+                  color: _isUnifyVip ? const Color(0xFFDEDEDE) : const Color(0xFFE5E5E5),
+                ),
                 borderRadius: BorderRadius.circular(5),
               ),
               child: Row(
@@ -231,10 +242,14 @@ class _MembersListPageState extends State<MembersListPage> {
                       _storeName.isNotEmpty ? _storeName : '演示门店',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 13, color: Colors.black),
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: _isUnifyVip ? Colors.black : const Color(0xFF999999),
+                      ),
                     ),
                   ),
-                  const Icon(Icons.arrow_drop_down, size: 20, color: Colors.black54),
+                  if (_isUnifyVip)
+                    const Icon(Icons.arrow_drop_down, size: 20, color: Colors.black54),
                 ],
               ),
             ),

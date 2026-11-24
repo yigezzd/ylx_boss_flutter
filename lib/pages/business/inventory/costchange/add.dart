@@ -21,13 +21,14 @@ import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 enum _CcAction { none, save, sign, delete, print, withdraw }
 
 class InventoryCostchangeAddPage extends StatefulWidget {
-  final Map<String, dynamic>? billData;
   const InventoryCostchangeAddPage({super.key, this.billData});
+  final Map<String, dynamic>? billData;
 
   @override
   State<InventoryCostchangeAddPage> createState() => _InventoryCostchangeAddPageState();
@@ -62,6 +63,9 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
   String _userid = '';
   bool _isSelectMode = false;
   Set<int> _selectedIndices = {};
+
+  /// 未保存修改比对基线（进入页面/加载完成/保存完成后更新）
+  String _formSnapshot = '';
 
   bool get _isEdit => _billData != null && (_billData!['billid']?.toString().isNotEmpty ?? false);
   bool get _isSigned => _billData?['signflag']?.toString() == '1';
@@ -123,6 +127,8 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
     } else {
       _loadDefaults();
     }
+    // 新增模式：默认值回填后建立基线，未改动直接返回不弹窗
+    _refreshSnapshot();
     logEnter();
   }
 
@@ -167,6 +173,8 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
   }
 
@@ -193,7 +201,8 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
   /// 成本变更 defValSet: 初始化默认值并计算amt（对齐 lxAss defValSet）
   static void _defValSet(Map<String, dynamic> d) {
     // 对齐 lxAss: obj.oldcostprice = obj.costprice ?? 0
-    d['oldcostprice'] = MathUtils.formatDecimal(2, double.tryParse(d['costprice']?.toString() ?? '0') ?? 0);
+    d['oldcostprice'] =
+        MathUtils.formatDecimal(2, double.tryParse(d['costprice']?.toString() ?? '0') ?? 0);
     // 新成本价默认 0（对齐 lxAss defValSet: obj.newcostprice = obj.newcostprice ?? 0），价格类位数 formatDecimal(2)
     d['newcostprice'] =
         MathUtils.formatDecimal(2, double.tryParse(d['newcostprice']?.toString() ?? '0') ?? 0);
@@ -230,7 +239,56 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
     return total;
   }
 
-  void _save({bool doSign = false}) {
+  // ═══ 返回与未保存修改检测 ═══
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _bsid,
+      _remarkCtrl.text,
+      jsonEncode(_fileLists),
+      jsonEncode(_detailList
+          .map((e) => {
+                'prodid': e['prodid']?.toString() ?? '',
+                'unit': e['unit']?.toString() ?? '',
+                'size': e['size']?.toString() ?? '',
+                'oldcostprice': e['oldcostprice']?.toString() ?? '',
+                'newcostprice': e['newcostprice']?.toString() ?? '',
+                'stockqty': e['stockqty']?.toString() ?? '',
+                'remark': e['remark']?.toString() ?? '',
+              })
+          .toList()),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/待审核（signflag 0）单据；
+  /// 已审核(1)/已驳回(2) 为只读或撤回态，无保存入口，直接放行
+  bool get _guardEnabled => (_billData?['signflag']?.toString() ?? '0') == '0';
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      _save(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
+  void _save({bool doSign = false, bool popAfterSave = false}) {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('014203', showTip: false)) {
         Toast.show('你无权编辑成本变更，请在后台修改权限');
@@ -276,11 +334,15 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
       }
       if (!doSign) {
         Toast.show('保存成功');
+        // 保存成功后重建基线，避免返回时重复提示
+        _refreshSnapshot();
       } else if (data is Map<String, dynamic>) {
         _doSignAfterSave(data);
       } else {
         _sign();
       }
+      // 返回拦截中选择「保存」：保存成功后直接返回上一页
+      if (popAfterSave && !doSign && mounted) Navigator.pop(context, true);
     }).whenComplete(() {
       if (mounted && !doSign) setState(() => _submitAction = _CcAction.none);
     });
@@ -563,7 +625,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
             ));
     if (confirm != true) return;
     setState(() => _submitAction = _CcAction.delete);
-    request(HttpApi.costChangeDelBill, _billData!).then((result) {
+    request(HttpApi.costChangeDelBill, _billData).then((result) {
       if (!mounted) return;
       Toast.show('删除成功');
       Navigator.pop(context, true);
@@ -595,7 +657,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
                   storeid: int.tryParse(_bsid ?? ''),
                   billtypeflag: 'cbbg',
                   initialKeyword: keyword,
-                  mergData: {
+                  mergData: const {
                     'stockflag': 1,
                   },
                   paramJust: const ['newcostprice', 'remark'],
@@ -912,7 +974,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
 
   Future<void> _selectStore() async {
     FocusScope.of(context).unfocus();
-    final result = await SelectStorePage.show(context, showAll: false);
+    final result = await SelectStorePage.show(context);
     if (result != null && mounted) {
       setState(() {
         _bsid = result['storeid']?.toString();
@@ -925,7 +987,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
   @override
   Widget build(BuildContext context) {
     final disabled = _isSigned;
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
           backgroundColor: Colors.white,
@@ -935,7 +997,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
           leadingWidth: 40,
           leading: IconButton(
               icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-              onPressed: () => Navigator.pop(context)),
+              onPressed: _onBackPressed),
           title: Text(_isEdit ? '修改成本变更单' : '新增成本变更单',
               style: const TextStyle(
                   fontSize: 17, fontWeight: FontWeight.w600, color: Color(0xFF111827)))),
@@ -943,7 +1005,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : Column(children: [
               Expanded(
-                  child: Container(
+                  child: ColoredBox(
                       color: const Color(0xFFF5F5F5),
                       child: CustomScrollView(
                         cacheExtent: 800,
@@ -985,7 +1047,8 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
                                                       fontSize: 12, color: Color(0xFF7A7A7A))),
                                             ])))),
                           // ---- 审核日志卡片（多级审批） ----
-                          if (_isEdit && (_reviewFlowUsers.isNotEmpty || _reviewBillFlows.isNotEmpty))
+                          if (_isEdit &&
+                              (_reviewFlowUsers.isNotEmpty || _reviewBillFlows.isNotEmpty))
                             SliverToBoxAdapter(
                                 child: Padding(
                                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
@@ -1015,14 +1078,14 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
                           SliverPersistentHeader(
                               pinned: true, delegate: _CcStickyHeaderDelegate(state: this)),
                           if (_detailList.isEmpty)
-                            SliverToBoxAdapter(
+                            const SliverToBoxAdapter(
                               child: Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 32),
+                                padding: EdgeInsets.symmetric(vertical: 32),
                                 child: Center(
                                   child: Column(mainAxisSize: MainAxisSize.min, children: [
                                     LoadAssetImage('state/zwsp', width: 80, height: 80),
-                                    const SizedBox(height: 12),
-                                    const Text('暂无商品明细',
+                                    SizedBox(height: 12),
+                                    Text('暂无商品明细',
                                         style: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF))),
                                   ]),
                                 ),
@@ -1034,7 +1097,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
                               itemBuilder: (context, index) => RepaintBoundary(
                                 child: Padding(
                                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-                                  child: Container(
+                                  child: ColoredBox(
                                     color: Colors.white,
                                     child: _buildDetailItem(_detailList[index], index, disabled),
                                   ),
@@ -1103,42 +1166,44 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
                             (_bolHandleTT || (_reviewFlowUsers.isNotEmpty && _bolHandleT))) ...[
                           const SizedBox(width: 10),
                           Expanded(
-                            child: GestureDetector(
-                                onTap: _submitAction != _CcAction.none ? null : () => _save(),
-                                child: Container(
-                                    height: 42,
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF006EFF),
-                                        borderRadius: BorderRadius.circular(6)),
-                                    alignment: Alignment.center,
-                                    child: _submitAction == _CcAction.save
-                                        ? const SizedBox(
-                                            width: 20,
-                                            height: 20,
-                                            child: CircularProgressIndicator(
-                                                strokeWidth: 2, color: Colors.white))
-                                        : const Text('保存',
-                                            style: TextStyle(fontSize: 15, color: Colors.white))))),
-                        const SizedBox(width: 10),
-                        Expanded(
-                            child: GestureDetector(
-                                onTap: _submitAction != _CcAction.none
-                                    ? null
-                                    : () => _save(doSign: true),
-                                child: Container(
-                                    height: 42,
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF00A870),
-                                        borderRadius: BorderRadius.circular(6)),
-                                    alignment: Alignment.center,
-                                    child: _submitAction == _CcAction.sign
-                                        ? const SizedBox(
-                                            width: 20,
-                                            height: 20,
-                                            child: CircularProgressIndicator(
-                                                strokeWidth: 2, color: Colors.white))
-                                        : const Text('审核',
-                                            style: TextStyle(fontSize: 15, color: Colors.white))))),
+                              child: GestureDetector(
+                                  onTap: _submitAction != _CcAction.none ? null : () => _save(),
+                                  child: Container(
+                                      height: 42,
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFF006EFF),
+                                          borderRadius: BorderRadius.circular(6)),
+                                      alignment: Alignment.center,
+                                      child: _submitAction == _CcAction.save
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                  strokeWidth: 2, color: Colors.white))
+                                          : const Text('保存',
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
+                          const SizedBox(width: 10),
+                          Expanded(
+                              child: GestureDetector(
+                                  onTap: _submitAction != _CcAction.none
+                                      ? null
+                                      : () => _save(doSign: true),
+                                  child: Container(
+                                      height: 42,
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFF00A870),
+                                          borderRadius: BorderRadius.circular(6)),
+                                      alignment: Alignment.center,
+                                      child: _submitAction == _CcAction.sign
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                  strokeWidth: 2, color: Colors.white))
+                                          : const Text('审核',
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
                         ],
                         // 撤回按钮 - 仅已驳回状态(signflag==2)显示
                         if (_isRejected) ...[
@@ -1159,7 +1224,8 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
                                               child: CircularProgressIndicator(
                                                   strokeWidth: 2, color: Colors.white))
                                           : const Text('撤回',
-                                              style: TextStyle(fontSize: 15, color: Colors.white))))),
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
                         ],
                       ] else ...[
                         Expanded(
@@ -1200,21 +1266,29 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
                                               child: CircularProgressIndicator(
                                                   strokeWidth: 2, color: Colors.white))
                                           : const Text('审核',
-                                              style: TextStyle(fontSize: 15, color: Colors.white))))),
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
                         ],
                       ],
                     ]),
                   ]),
             ),
     );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
+    );
   }
 
   Widget _buildBatchDeleteBar() {
     final selectedCount = _selectedIndices.length;
     return Container(
-      decoration: BoxDecoration(
+      decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(top: BorderSide(color: const Color(0xFFE5E7EB))),
+        border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
       ),
       padding: EdgeInsets.only(
         left: 16,
@@ -1299,21 +1373,17 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
         behavior: HitTestBehavior.opaque,
         child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
+            child: Row(children: [
               // 星号固定占位，文字始终从同一起点对齐
               SizedBox(
                 width: 8,
                 child: required
-                    ? const Text('*',
-                        style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A)))
+                    ? const Text('*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A)))
                     : null,
               ),
               SizedBox(
                 width: 64,
-                child: Text(label,
-                    style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
+                child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -1434,17 +1504,14 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
               width: _isSigned ? 72 : 64,
               child: const Text('附件',
                   style: TextStyle(
-                      fontSize: 13,
-                      color: Color(0xFF374151),
-                      fontWeight: FontWeight.w500))),
+                      fontSize: 13, color: Color(0xFF374151), fontWeight: FontWeight.w500))),
           const SizedBox(width: 8),
           Expanded(
               child: Row(children: [
             const Icon(Icons.attach_file, size: 16, color: Color(0xFF006EFF)),
             const SizedBox(width: 4),
             Text('附件(${_fileLists.length})',
-                style:
-                    const TextStyle(fontSize: 13, color: Color(0xFF006EFF))),
+                style: const TextStyle(fontSize: 13, color: Color(0xFF006EFF))),
             const SizedBox(width: 4),
             const Icon(Icons.arrow_forward_ios, size: 12, color: Color(0xFFC0C4CC)),
           ])),
@@ -1453,21 +1520,43 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
     );
   }
 
+  /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入）
+  bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
+
+  /// 明细编辑弹窗确认关闭后焦点“落空”时，将焦点恢复到红外扫描框，支持连续扫码；
+  /// 焦点已落到其他输入框（用户主动点按）时不干预；弹窗收尾动画中最多重试 30 帧再评估
+  void _returnFocusToScanIfIdle([int retryFrame = 0]) {
+    if (!_showScanInput) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanInput) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点；收尾动画中重试等待
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        if (retryFrame < 30) _returnFocusToScanIfIdle(retryFrame + 1);
+        return;
+      }
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
+  }
+
   void _showProductDetail(Map<String, dynamic> item, int index) {
     final disabled = _isSigned;
     final name = item['productname']?.toString() ?? item['name']?.toString() ?? '';
-    var barcode = item['barcode']?.toString() ?? item['selfbarcode']?.toString() ?? '';
-    var unit = item['unit']?.toString() ?? '';
-    var size = item['size']?.toString() ?? '';
-    var unitonlyid = item['unitonlyid']?.toString() ?? '';
-    var sizeonlyid = item['sizeonlyid']?.toString() ?? '';
-    var saleprice =
+    final barcode = item['barcode']?.toString() ?? item['selfbarcode']?.toString() ?? '';
+    final unit = item['unit']?.toString() ?? '';
+    final size = item['size']?.toString() ?? '';
+    final unitonlyid = item['unitonlyid']?.toString() ?? '';
+    final sizeonlyid = item['sizeonlyid']?.toString() ?? '';
+    final saleprice =
         double.tryParse(item['saleprice']?.toString() ?? item['sellprice']?.toString() ?? '') ?? 0;
-    var shelves = item['shelves']?.toString() ?? '';
-    var costprice = double.tryParse(item['costprice']?.toString() ?? '0') ?? 0;
-    var inprice = double.tryParse(item['inprice']?.toString() ?? '') ?? costprice;
-    var oldcostprice = double.tryParse(item['oldcostprice']?.toString() ?? '') ?? 0;
-    double stockqty = double.tryParse(item['stockqty']?.toString() ?? '') ?? 0;
+    final shelves = item['shelves']?.toString() ?? '';
+    final costprice = double.tryParse(item['costprice']?.toString() ?? '0') ?? 0;
+    final inprice = double.tryParse(item['inprice']?.toString() ?? '') ?? costprice;
+    final oldcostprice = double.tryParse(item['oldcostprice']?.toString() ?? '') ?? 0;
+    final double stockqty = double.tryParse(item['stockqty']?.toString() ?? '') ?? 0;
 
     double editNewcostprice = double.tryParse(item['newcostprice']?.toString() ?? '') ?? 0;
     String editRemark = item['remark']?.toString() ?? '';
@@ -1495,205 +1584,219 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
-          child: Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  margin: const EdgeInsets.only(top: 8, bottom: 4),
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFE5E7EB),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  child: Row(
-                    children: [
-                      // 左侧占位，平衡关闭按钮宽度，标题居中
-                      const SizedBox(width: 24),
-                      Expanded(
-                        child: const Text('商品详情',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.w600, color: Color(0xFF111827))),
-                      ),
-                      GestureDetector(
-                        onTap: () => Navigator.pop(ctx),
-                        child: const Icon(Icons.close, size: 20, color: Color(0xFF6B7280)),
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(height: 1, color: Color(0xFFE5E7EB)),
-                Flexible(
-                  child: SingleChildScrollView(
-                    padding: EdgeInsets.only(
-                      left: 16,
-                      right: 16,
-                      top: 12,
-                      bottom: MediaQuery.of(context).padding.bottom + 88,
+      builder: (ctx) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: StatefulBuilder(
+          builder: (ctx, setDialogState) => ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    margin: const EdgeInsets.only(top: 8, bottom: 4),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE5E7EB),
+                      borderRadius: BorderRadius.circular(2),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    child: Row(
                       children: [
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF9FAFB),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFFE5E7EB)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '商品名称：$name',
-                                style: const TextStyle(
-                                  fontSize: 15,
+                        // 左侧占位，平衡关闭按钮宽度，标题居中
+                        const SizedBox(width: 24),
+                        const Expanded(
+                          child: Text('商品详情',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  fontSize: 16,
                                   fontWeight: FontWeight.w600,
-                                  color: Color(0xFF111827),
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text('条码：$barcode',
-                                  style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
-                              const SizedBox(height: 4),
-                              Text('进价：¥${MathUtils.formatDecimal(2, inprice)}',
-                                  style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
-                              const SizedBox(height: 4),
-                              Text('库存：${MathUtils.formatDecimal(1, stockqty)}',
-                                  style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
-                            ],
-                          ),
+                                  color: Color(0xFF111827))),
                         ),
-                        const SizedBox(height: 12),
-                        _buildDetailReadonlyField(
-                            label: '单位', value: unit.isNotEmpty ? unit : '-'),
-                        _buildDetailDivider(),
-                        _buildDetailReadonlyField(
-                            label: '规格', value: size.isNotEmpty ? size : '-'),
-                        _buildDetailDivider(),
-                        _buildDetailReadonlyField(
-                            label: '原成本价', value: '¥${MathUtils.formatDecimal(2, oldcostprice)}'),
-                        _buildDetailDivider(),
-                        if (disabled)
-                          _buildDetailReadonlyField(
-                              label: '新成本价',
-                              value: '¥${MathUtils.formatDecimal(2, editNewcostprice)}')
-                        else
-                          _buildDetailFormField(
-                            label: '新成本价',
-                            controller: newcostpriceCtrl,
-                            focusNode: newcostpriceFocus,
-                            isDecimal: true,
-                            onChanged: (v) {
-                              final val = double.tryParse(v) ?? 0;
-                              setDialogState(() => editNewcostprice = val);
-                            },
-                          ),
-                        _buildDetailDivider(),
-                        _buildDetailReadonlyField(
-                          label: '变更差额',
-                          value:
-                              '¥${MathUtils.formatDecimal(3, MathUtils.multiply(MathUtils.subtract(editNewcostprice, oldcostprice), stockqty))}',
+                        GestureDetector(
+                          onTap: () => Navigator.pop(ctx),
+                          child: const Icon(Icons.close, size: 20, color: Color(0xFF6B7280)),
                         ),
-                        _buildDetailDivider(),
-                        if (disabled)
-                          _buildDetailReadonlyField(label: '备注', value: editRemark)
-                        else
-                          _buildDetailFormField(
-                            label: '备注',
-                            controller: remarkCtrl,
-                            keyboardType: TextInputType.text,
-                            onChanged: (v) {
-                              setDialogState(() => editRemark = v);
-                            },
-                          ),
                       ],
                     ),
                   ),
-                ),
-                Container(
-                  padding: EdgeInsets.only(
-                    left: 16,
-                    right: 16,
-                    top: 10,
-                    bottom: MediaQuery.of(context).padding.bottom + 12,
-                  ),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFF6B7280),
-                            side: const BorderSide(color: Color(0xFFE5E7EB)),
-                            padding: const EdgeInsets.symmetric(vertical: 13),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          ),
-                          child: const Text('取消', style: TextStyle(fontSize: 15)),
-                        ),
+                  const Divider(height: 1, color: Color(0xFFE5E7EB)),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      padding: EdgeInsets.only(
+                        left: 16,
+                        right: 16,
+                        top: 12,
+                        bottom: MediaQuery.of(context).padding.bottom + 88,
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: ElevatedButton(
-                          onPressed: disabled
-                              ? () => Navigator.pop(ctx)
-                              : () {
-                                  setState(() {
-                                    _detailList[index]['unit'] = unit;
-                                    _detailList[index]['size'] = size;
-                                    _detailList[index]['unitonlyid'] = unitonlyid;
-                                    _detailList[index]['sizeonlyid'] = sizeonlyid;
-                                    _detailList[index]['remark'] = editRemark;
-                                    _detailList[index]['barcode'] = barcode;
-                                    _detailList[index]['code'] = item['code']?.toString() ?? '';
-                                    _detailList[index]['stockqty'] = item['stockqty']?.toString() ??
-                                        item['stock']?.toString() ??
-                                        '';
-                                    _detailList[index]['saleprice'] = saleprice.toStringAsFixed(2);
-                                    _detailList[index]['sellprice'] = saleprice.toStringAsFixed(2);
-                                    _detailList[index]['shelves'] = shelves;
-                                    _detailList[index]['costprice'] = costprice.toStringAsFixed(3);
-                                    _detailList[index]['oldcostprice'] =
-                                        MathUtils.formatDecimal(2, oldcostprice);
-                                    _detailList[index]['inprice'] = inprice.toStringAsFixed(3);
-                                    _detailList[index]['newcostprice'] =
-                                        editNewcostprice.toStringAsFixed(3);
-                                    _writeData('newcostprice', _detailList[index]);
-                                  });
-                                  Navigator.pop(ctx);
-                                },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF006EFF),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 13),
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF9FAFB),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: const Color(0xFFE5E7EB)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '商品名称：$name',
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF111827),
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text('条码：$barcode',
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
+                                const SizedBox(height: 4),
+                                Text('进价：¥${MathUtils.formatDecimal(2, inprice)}',
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
+                                const SizedBox(height: 4),
+                                Text('库存：${MathUtils.formatDecimal(1, stockqty)}',
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
+                              ],
+                            ),
                           ),
-                          child: const Text('确定',
-                              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
-                        ),
+                          const SizedBox(height: 12),
+                          _buildDetailReadonlyField(
+                              label: '单位', value: unit.isNotEmpty ? unit : '-'),
+                          _buildDetailDivider(),
+                          _buildDetailReadonlyField(
+                              label: '规格', value: size.isNotEmpty ? size : '-'),
+                          _buildDetailDivider(),
+                          _buildDetailReadonlyField(
+                              label: '原成本价', value: '¥${MathUtils.formatDecimal(2, oldcostprice)}'),
+                          _buildDetailDivider(),
+                          if (disabled)
+                            _buildDetailReadonlyField(
+                                label: '新成本价',
+                                value: '¥${MathUtils.formatDecimal(2, editNewcostprice)}')
+                          else
+                            _buildDetailFormField(
+                              label: '新成本价',
+                              controller: newcostpriceCtrl,
+                              focusNode: newcostpriceFocus,
+                              isDecimal: true,
+                              onChanged: (v) {
+                                final val = double.tryParse(v) ?? 0;
+                                setDialogState(() => editNewcostprice = val);
+                              },
+                            ),
+                          _buildDetailDivider(),
+                          _buildDetailReadonlyField(
+                            label: '变更差额',
+                            value:
+                                '¥${MathUtils.formatDecimal(3, MathUtils.multiply(MathUtils.subtract(editNewcostprice, oldcostprice), stockqty))}',
+                          ),
+                          _buildDetailDivider(),
+                          if (disabled)
+                            _buildDetailReadonlyField(label: '备注', value: editRemark)
+                          else
+                            _buildDetailFormField(
+                              label: '备注',
+                              controller: remarkCtrl,
+                              keyboardType: TextInputType.text,
+                              onChanged: (v) {
+                                setDialogState(() => editRemark = v);
+                              },
+                            ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                  Container(
+                    padding: EdgeInsets.only(
+                      left: 16,
+                      right: 16,
+                      top: 10,
+                      bottom: MediaQuery.of(context).padding.bottom + 12,
+                    ),
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFF6B7280),
+                              side: const BorderSide(color: Color(0xFFE5E7EB)),
+                              padding: const EdgeInsets.symmetric(vertical: 13),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: const Text('取消', style: TextStyle(fontSize: 15)),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: disabled
+                                ? () => Navigator.pop(ctx)
+                                : () {
+                                    setState(() {
+                                      _detailList[index]['unit'] = unit;
+                                      _detailList[index]['size'] = size;
+                                      _detailList[index]['unitonlyid'] = unitonlyid;
+                                      _detailList[index]['sizeonlyid'] = sizeonlyid;
+                                      _detailList[index]['remark'] = editRemark;
+                                      _detailList[index]['barcode'] = barcode;
+                                      _detailList[index]['code'] = item['code']?.toString() ?? '';
+                                      _detailList[index]['stockqty'] =
+                                          item['stockqty']?.toString() ??
+                                              item['stock']?.toString() ??
+                                              '';
+                                      _detailList[index]['saleprice'] =
+                                          saleprice.toStringAsFixed(2);
+                                      _detailList[index]['sellprice'] =
+                                          saleprice.toStringAsFixed(2);
+                                      _detailList[index]['shelves'] = shelves;
+                                      _detailList[index]['costprice'] =
+                                          costprice.toStringAsFixed(3);
+                                      _detailList[index]['oldcostprice'] =
+                                          MathUtils.formatDecimal(2, oldcostprice);
+                                      _detailList[index]['inprice'] = inprice.toStringAsFixed(3);
+                                      _detailList[index]['newcostprice'] =
+                                          editNewcostprice.toStringAsFixed(3);
+                                      _writeData('newcostprice', _detailList[index]);
+                                    });
+                                    // 弹窗确认编辑后评估恢复扫描框焦点（连续扫码）
+                                    _returnFocusToScanIfIdle();
+                                    Navigator.pop(ctx);
+                                  },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF006EFF),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 13),
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: const Text('确定',
+                                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1813,7 +1916,7 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
     final disabled = _isSigned;
     return Align(
       alignment: Alignment.topCenter,
-      child: Container(
+      child: ColoredBox(
         color: const Color(0xFFF5F5F5),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -2018,8 +2121,8 @@ class _InventoryCostchangeAddPageState extends State<InventoryCostchangeAddPage>
 }
 
 class _CcStickyHeaderDelegate extends SliverPersistentHeaderDelegate {
-  final _InventoryCostchangeAddPageState state;
   _CcStickyHeaderDelegate({required this.state});
+  final _InventoryCostchangeAddPageState state;
   @override
   double get minExtent => state._isSigned
       ? _InventoryCostchangeAddPageState._stickySignedExtent

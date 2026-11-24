@@ -5,6 +5,7 @@ import 'package:flutter_deer/components/select/select_store.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
 import 'package:flutter_deer/res/constant.dart';
+import 'package:flutter_deer/util/math_utils.dart';
 import 'package:sp_util/sp_util.dart';
 
 /// 库存查询 - 商品详情页
@@ -43,6 +44,9 @@ class _InventorySearchDetailPageState extends State<InventorySearchDetailPage>
   List<int> _sids = [];
   String _activeStoreId = '';
 
+  /// Cost view permission (align lxAss detail.vue user.costpriceflag): show **** when != 1
+  int _costpriceflag = 1;
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +70,17 @@ class _InventorySearchDetailPageState extends State<InventorySearchDetailPage>
         _sids = widget.sids.isNotEmpty
             ? widget.sids
             : (storeId.isNotEmpty ? [int.tryParse(storeId) ?? 0] : []);
+      }
+    } catch (_) {}
+
+    // Read cost view permission from login user (align lxAss detail.vue user.costpriceflag)
+    try {
+      final String userStr = SpUtil.getString(Constant.user) ?? '';
+      if (userStr.isNotEmpty) {
+        final Map<String, dynamic> userMap =
+            jsonDecode(userStr) as Map<String, dynamic>;
+        _costpriceflag =
+            int.tryParse(userMap['costpriceflag']?.toString() ?? '1') ?? 1;
       }
     } catch (_) {}
 
@@ -141,6 +156,8 @@ class _InventorySearchDetailPageState extends State<InventorySearchDetailPage>
       'is_page': 1,
       'productid': productId,
       'sids': _sids,
+      // 对齐 lxAss detail.vue storeKcInfo：返回各行仓库库存 counterstocklist
+      'counterstockflag': 1,
     }, false, false).then((result) {
       if (mounted) {
         final data = result['data'];
@@ -408,10 +425,14 @@ class _InventorySearchDetailPageState extends State<InventorySearchDetailPage>
     final rows = [
       _InfoRow('零售价', '￥${_fmt(2, _stockInfo['sellprice'])}'),
       _InfoRow('商品库存', _fmt(2, _stockInfo['qty'])),
-      _InfoRow('库存单价', '￥${_fmt(2, _stockInfo['costprice'])}'),
-      _InfoRow('库存金额', '￥${_fmt(2, _stockInfo['amt'])}'),
-      _InfoRow('未税单价', '￥${_fmt(2, _stockInfo['notaxcostprice'])}'),
-      _InfoRow('未税库存金额', '￥${_fmt(2, _stockInfo['notaxamt'])}'),
+      _InfoRow('库存单价',
+          _costpriceflag == 1 ? '￥${_fmt(2, _stockInfo['costprice'])}' : '￥****'),
+      _InfoRow('库存金额',
+          _costpriceflag == 1 ? '￥${_fmt(2, _stockInfo['amt'])}' : '￥****'),
+      _InfoRow('未税单价',
+          _costpriceflag == 1 ? '￥${_fmt(2, _stockInfo['notaxcostprice'])}' : '￥****'),
+      _InfoRow('未税库存金额',
+          _costpriceflag == 1 ? '￥${_fmt(2, _stockInfo['notaxamt'])}' : '￥****'),
       _InfoRow('未税零售价', '￥${_fmt(2, _stockInfo['notaxsellprice'])}'),
     ];
 
@@ -504,6 +525,25 @@ class _InventorySearchDetailPageState extends State<InventorySearchDetailPage>
     );
   }
 
+  // ── 机构库存行点击：仓库库存弹窗（对齐 lxAss detail.vue onStockRowClick）──
+  void _onStockRowClick(Map<String, dynamic> row) {
+    final dynamic raw = row['counterstocklist'];
+    final list = (raw is List)
+        ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList()
+        : <Map<String, dynamic>>[];
+    // 无仓库库存数据时不弹窗
+    if (list.isEmpty) return;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (_) => _StockPopSheet(list: list, totalQty: row['qty']),
+    );
+  }
+
   // ── Tab 2: 机构库存 ──
   Widget _buildStoreKcTab() {
     return Column(
@@ -553,6 +593,7 @@ class _InventorySearchDetailPageState extends State<InventorySearchDetailPage>
                       child: SizedBox(
                         width: MediaQuery.of(context).size.width - 24,
                         child: DataTable(
+                          showCheckboxColumn: false,
                           headingRowColor: WidgetStateProperty.all(
                               const Color(0xFFF9FAFB)),
                           dataRowMinHeight: 42,
@@ -584,21 +625,133 @@ class _InventorySearchDetailPageState extends State<InventorySearchDetailPage>
                           ],
                           rows: List.generate(_storeKcList.length, (index) {
                             final item = _storeKcList[index];
-                            return DataRow(cells: [
-                              DataCell(Text('${index + 1}',
-                                  style: const TextStyle(fontSize: 13))),
-                              DataCell(Text(
-                                  item['storename']?.toString() ?? '--',
-                                  style: const TextStyle(fontSize: 13))),
-                              DataCell(Text(_fmt(2, item['qty']),
-                                  style: const TextStyle(fontSize: 13))),
-                            ]);
+                            // 多仓库有库存时追加引导标识（对齐 lxAss formatter）
+                            final dynamic counterList =
+                                item['counterstocklist'];
+                            final String qtyText =
+                                (counterList is List && counterList.length > 1)
+                                    ? '${_fmt(2, item['qty'])} ›'
+                                    : _fmt(2, item['qty']);
+                            return DataRow(
+                              onSelectChanged: (_) => _onStockRowClick(item),
+                              cells: [
+                                DataCell(Text('${index + 1}',
+                                    style: const TextStyle(fontSize: 13))),
+                                DataCell(Text(
+                                    item['storename']?.toString() ?? '--',
+                                    style: const TextStyle(fontSize: 13))),
+                                DataCell(Text(qtyText,
+                                    style: const TextStyle(fontSize: 13))),
+                              ],
+                            );
                           }),
                         ),
                       ),
                     ),
         ),
       ],
+    );
+  }
+}
+
+/// 仓库库存弹窗（对齐 lxAss detail.vue stock-pop）
+///
+/// 首行粗体展示总库存（取机构行库存数量），其后逐行展示各仓库名称与库存数量。
+class _StockPopSheet extends StatelessWidget {
+  final List<Map<String, dynamic>> list;
+  final dynamic totalQty;
+
+  const _StockPopSheet({required this.list, required this.totalQty});
+
+  @override
+  Widget build(BuildContext context) {
+    // 对齐 lxAss：弹窗最高不超过屏幕高度的 75%
+    final double maxH = MediaQuery.of(context).size.height * 0.75;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: maxH),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 头部：标题居中 + 右侧关闭（Stack 需撑满宽度，避免关闭按钮压在标题上）
+          SizedBox(
+            height: 45,
+            width: double.infinity,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                const Text('仓库库存',
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF111827))),
+                Positioned(
+                  right: 6,
+                  top: 0,
+                  bottom: 0,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => Navigator.pop(context),
+                    child: const Icon(Icons.close,
+                        size: 18, color: Color(0xFF333333)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Flexible(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 40),
+              children: [
+                // 总库存行（直接取机构行库存数量）
+                _buildItemRow(
+                    '总库存', MathUtils.formatDecimal(1, totalQty),
+                    bold: true),
+                // 各仓库库存行
+                for (int i = 0; i < list.length; i++)
+                  _buildItemRow(
+                    list[i]['countername']?.toString() ?? '',
+                    MathUtils.formatDecimal(1, list[i]['qty']),
+                    isLast: i == list.length - 1,
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildItemRow(String label, String value,
+      {bool bold = false, bool isLast = false}) {
+    final TextStyle style = TextStyle(
+      fontSize: 14,
+      color: bold ? const Color(0xFF111827) : const Color(0xFF333333),
+      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+    );
+    return RepaintBoundary(
+      child: Container(
+        height: 48,
+        decoration: BoxDecoration(
+          border: Border(
+            top: const BorderSide(color: Color(0xFFE2E2E2), width: 0.5),
+            bottom: isLast
+                ? const BorderSide(color: Color(0xFFE2E2E2), width: 0.5)
+                : BorderSide.none,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Flexible(
+              child: Text(label,
+                  style: style,
+                  overflow: TextOverflow.ellipsis),
+            ),
+            const SizedBox(width: 12),
+            Text(value, style: style),
+          ],
+        ),
+      ),
     );
   }
 }

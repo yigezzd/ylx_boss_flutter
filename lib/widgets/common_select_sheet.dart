@@ -19,6 +19,7 @@ class CommonSelectSheet extends StatefulWidget {
     this.showAll = false,
     this.initialSelectedId,
     this.mapResult,
+    this.itemFields,
   });
 
   /// 抽屉标题
@@ -49,6 +50,11 @@ class CommonSelectSheet extends StatefulWidget {
   /// 单选模式：点击条目后的结果转换函数。
   final Map<String, dynamic> Function(Map<String, dynamic> item)? mapResult;
 
+  /// 列表项字段卡片配置（对齐 boss selectCom 的 itemFields）：
+  /// 形如 `[{'label': '机号', 'key': 'code'}, ...]`，每行两个字段；
+  /// 传了则按卡片渲染（隐藏单选框），不传走默认的 [编码]名称 行
+  final List<Map<String, String>>? itemFields;
+
   /// 便捷静态方法：打开底部抽屉并返回选择结果
   static Future<Map<String, dynamic>?> show(
     BuildContext context, {
@@ -61,6 +67,7 @@ class CommonSelectSheet extends StatefulWidget {
     bool showAll = false,
     String? initialSelectedId,
     Map<String, dynamic> Function(Map<String, dynamic>)? mapResult,
+    List<Map<String, String>>? itemFields,
   }) {
     return showModalBottomSheet<Map<String, dynamic>>(
       context: context,
@@ -78,6 +85,7 @@ class CommonSelectSheet extends StatefulWidget {
           showAll: showAll,
           initialSelectedId: initialSelectedId,
           mapResult: mapResult,
+          itemFields: itemFields,
         ),
       ),
     );
@@ -341,6 +349,25 @@ class _CommonSelectSheetState extends State<CommonSelectSheet> {
                               );
                       }
                       final item = _list[dataIndex];
+                      // 传了 itemFields：按字段卡片渲染（对齐 boss selectCom itemFields）
+                      if (widget.itemFields != null && widget.itemFields!.isNotEmpty) {
+                        final String cardId = item[widget.idField]?.toString() ?? '';
+                        final bool cardSelected = _selectedId == cardId;
+                        return GestureDetector(
+                          onTap: () => _onTapItem(item),
+                          behavior: HitTestBehavior.opaque,
+                          child: Container(
+                            margin: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: cardSelected ? const Color(0xFFF0F7FF) : bgColor,
+                              border: Border.all(color: dividerColor),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: _buildFieldCard(item, textColor),
+                          ),
+                        );
+                      }
                       final String id = item[widget.idField]?.toString() ?? '';
                       final bool isSelected = _selectedId == id;
                       return _buildSelectItem(
@@ -355,6 +382,41 @@ class _CommonSelectSheetState extends State<CommonSelectSheet> {
           ),
         ],
       ),
+    );
+  }
+
+  /// itemFields 卡片：每行两个字段（对齐 boss selectCom 两行两列布局）
+  Widget _buildFieldCard(Map<String, dynamic> item, Color textColor) {
+    final List<Map<String, String>> fields = widget.itemFields!;
+    final List<Widget> rows = <Widget>[];
+    for (int i = 0; i < fields.length; i += 2) {
+      final Map<String, String> left = fields[i];
+      final Map<String, String>? right = i + 1 < fields.length ? fields[i + 1] : null;
+      rows.add(Row(
+        children: [
+          Expanded(child: _buildFieldText(left, item, textColor)),
+          if (right != null) ...[
+            const SizedBox(width: 8),
+            Expanded(child: _buildFieldText(right, item, textColor, alignRight: true)),
+          ],
+        ],
+      ));
+      if (i + 2 < fields.length) {
+        rows.add(const SizedBox(height: 6));
+      }
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: rows);
+  }
+
+  Widget _buildFieldText(Map<String, String> field, Map<String, dynamic> item, Color color,
+      {bool alignRight = false}) {
+    final String value = item[field['key'] ?? '']?.toString() ?? '';
+    return Text(
+      '${field['label'] ?? ''}：${value.isEmpty ? '--' : value}',
+      textAlign: alignRight ? TextAlign.right : TextAlign.left,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(fontSize: 13, color: color),
     );
   }
 

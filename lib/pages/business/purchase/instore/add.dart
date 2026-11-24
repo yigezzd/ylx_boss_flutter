@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
@@ -24,11 +24,13 @@ import 'package:flutter_deer/util/in_price_height_utils.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/not_master_product_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:flutter_deer/widgets/voice_recognition_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
@@ -68,6 +70,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
   String? _storename;
   int? _storetype;
   int? _refbilltype = 1; // 与 Vue 端一致，默认采购订货单
+  int _billtype = 1; // 单据类型：1 采购入库、3 特价入库（对齐 PC instore/edit.vue）
   String? _refbillidFromInfo; // 从原单 getInfo 获取的 refbillid
   int? _countertype; // 仓库存储方式（对齐 Vue countertype）
   bool _isTipNotMasterProduct = true; // 非供货资格商品校验标志
@@ -101,6 +104,9 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
 
   /// 附件列表
   List<Map<String, dynamic>> _fileLists = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   bool get _isEdit =>
       (_newBillid != null && _newBillid!.isNotEmpty) ||
@@ -180,6 +186,9 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
     } else {
       _loadNewModeDefaults(); // 新增模式：加载机构/经手人默认值
     }
+    // 新增模式：同步默认值回填完成后建立基线，未改动直接返回不弹窗
+    // （默认仓库为异步回写，回写完成后在 _loadDefaultWarehouse 中再次重建基线）
+    _refreshSnapshot();
 
     // 操作审计：进入页面
     FileLogWriter.instance.writeOperationLog(
@@ -277,6 +286,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         _warehouseController.text = first['countername']?.toString() ?? '';
         _countertype = _parseIntFlexible(first, ['countertype']);
       });
+      // 默认仓库异步回写属于初始化动作，回写后重建基线，避免零操作返回被误判为脏数据
+      _refreshSnapshot();
     }).catchError((Object e) {
       debugPrint('[入库新增] 默认仓库拉取失败: $e');
     });
@@ -294,6 +305,39 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         row.rawData!['validdate'] = '';
       }
     }
+  }
+
+  /// 单据类型名称（对齐 PC instore/edit.vue：1 采购入库、3 特价入库）
+  String get _billtypeName => _billtype == 3 ? '特价入库' : '采购入库';
+
+  /// 首次录入取价（对齐 PC handleProperty）：
+  /// 特价入库优先取促销进价，其次采购价/档案进价；普通采购入库仍取采购价优先
+  double _entryPrice(Map<String, dynamic> item) {
+    final cgprice = double.tryParse(item['cgprice']?.toString() ?? '') ?? 0;
+    final price = double.tryParse(item['price']?.toString() ?? '') ?? 0;
+    if (_billtype == 3) {
+      final promotioninprice = double.tryParse(item['promotioninprice']?.toString() ?? '') ?? 0;
+      if (promotioninprice > 0) {
+        return promotioninprice;
+      }
+    }
+    return cgprice != 0 ? cgprice : price;
+  }
+
+  /// 特价入库且存在促销进价时，录入价格会被促销价覆盖，金额需按新价格重算（对齐 PC recalcAmtByPrice）
+  bool _usePromotionPrice(Map<String, dynamic> item) {
+    if (_billtype != 3) return false;
+    final promotioninprice = double.tryParse(item['promotioninprice']?.toString() ?? '') ?? 0;
+    return promotioninprice > 0;
+  }
+
+  /// 已保存数据回显取价：特价入库保留单据上的价格（用户改价不被采购价覆盖），
+  /// 普通采购入库沿用采购价优先
+  double _savedPrice(Map<String, dynamic> item) {
+    final cgprice = double.tryParse(item['cgprice']?.toString() ?? '') ?? 0;
+    final price = double.tryParse(item['price']?.toString() ?? '') ?? 0;
+    if (_billtype == 3 && price > 0) return price;
+    return cgprice != 0 ? cgprice : price;
   }
 
   /// 供应商/机构/仓库切换后刷新商品价格（对齐 Vue updateCgPrice）
@@ -385,6 +429,14 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           // 重算金额
           final qty = MathUtils.formatDecimalNum(1, double.tryParse(row.qtyController.text) ?? 0);
           row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
+
+          // 价格同步后回写商品最新的规格、单位 id（对齐 Vue updateTableDataInPlace）
+          if (row.rawData != null) {
+            final newSizeId = item['newsizeonlyid']?.toString();
+            final newUnitId = item['newunitonlyid']?.toString();
+            if (newSizeId != null) row.rawData!['sizeonlyid'] = newSizeId;
+            if (newUnitId != null) row.rawData!['unitonlyid'] = newUnitId;
+          }
         }
       });
     } catch (e) {
@@ -395,6 +447,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
   /// 构建商品查询参数（对齐 Vue mergDataFn），含 memorytype 条件
   Map<String, dynamic> _buildMergData() {
     final obj = <String, dynamic>{
+      'bzshowflag': 1,
       'stockflag': 1,
       'storeid': _storeid ?? '',
       'counterid': _counterid ?? '',
@@ -523,6 +576,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           _countertype = _parseIntFlexible(data, ['countertype']);
           // 加载原单号类型和ID
           _refbilltype = _parseIntFlexible(data, ['refbilltype']) ?? 1;
+          // 单据类型：1 采购入库、3 特价入库（须先于明细价格处理，回显规则依赖该值）
+          _billtype = _parseIntFlexible(data, ['billtype']) ?? 1;
           _refbillidFromInfo = data['refbillid']?.toString();
           // 将 API 明细转换为统一的 _DetailRow 对象
           final list = data['detaillist'] as List? ?? [];
@@ -533,10 +588,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           for (final v in list) {
             if (v is! Map) continue;
             final c = Map<String, dynamic>.from(v);
-            // 对齐 boss 项目 handleProperty：加载详情时用 cgprice 更新显示价格
-            final cgprice = double.tryParse(c['cgprice']?.toString() ?? '') ?? 0;
-            final oldPrice = double.tryParse(c['price']?.toString() ?? '') ?? 0;
-            final price = cgprice != 0 ? cgprice : oldPrice;
+            // 对齐 boss 项目 handleProperty：特价入库保留单据价格，普通入库用 cgprice 更新显示价格
+            final price = _savedPrice(c);
             c['price'] = double.parse(price.toStringAsFixed(2));
             // 对齐 Vue handleProperty：amt 始终由 qty*price 重算
             final qtyLoad = double.tryParse(c['qty']?.toString() ?? '') ?? 0;
@@ -562,12 +615,65 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
+  }
+
+  // =================== 返回与未保存修改检测 ===================
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _billtype,
+      _supid,
+      _storeid,
+      _counterid,
+      _buyerid,
+      _remarkController.text,
+      _refbillnoController.text,
+      jsonEncode(_fileLists),
+      _items
+          .map((r) =>
+              '${r.prodid}_${r.nameController.text}_${r.qtyController.text}_${r.priceController.text}_${r.giftQtyController.text}')
+          .join(','),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/未审核（signflag 0）单据；
+  /// 已审核(1)/驳回待处理(2) 为只读态，无保存入口，直接放行
+  bool get _guardEnabled {
+    final signflag = int.tryParse(_billData?['signflag']?.toString() ?? '0') ?? 0;
+    return signflag == 0;
+  }
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      await _submit(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
   }
 
   // =================== 提交保存 ===================
   /// 统一提交（新增 / 编辑共用）
-  Future<void> _submit({bool isDraft = false, bool withSign = false}) async {
+  Future<void> _submit(
+      {bool isDraft = false, bool withSign = false, bool popAfterSave = false}) async {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('011703', showTip: false)) {
         Toast.show('你无权编辑采购入库，请在后台修改权限');
@@ -767,6 +873,24 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
             return;
           }
         }
+        // nobatchproductbnxr: 不管理有效期的商品禁止录入批次和日期
+        final nobatchproductbnxr =
+            int.tryParse(loginCfg['nobatchproductbnxr']?.toString() ?? '0') ?? 0;
+        if (nobatchproductbnxr == 1) {
+          final noBatchViolations = submitItems.where((row) {
+            if ((row.prodid ?? '').isEmpty) return false;
+            final validflag = row.rawData?['validflag']?.toString() ?? '';
+            if (validflag != '0') return false;
+            final batchno = row.batchController.text.trim();
+            final birthdate = row.rawData?['birthdate']?.toString() ?? '';
+            final validdate = row.rawData?['validdate']?.toString() ?? '';
+            return batchno.isNotEmpty || birthdate.isNotEmpty || validdate.isNotEmpty;
+          }).toList();
+          if (noBatchViolations.isNotEmpty) {
+            Toast.show('不管理有效期的商品禁止录入批次和日期！');
+            return;
+          }
+        }
       } catch (_) {}
     }
 
@@ -803,7 +927,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         'name': '',
         'startdate': '',
         'enddate': '',
-        'billtype': 1,
+        'billtype': _billtype,
         'refbilltype': 1,
         'refbillno': '',
         'batchno': '',
@@ -818,6 +942,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
       };
     }
 
+    params['billtype'] = _billtype;
     params['billqty'] = totalQty;
     params['billamt'] = MathUtils.roundTo(totalAmt);
     params['detaillist'] = detaillist;
@@ -838,6 +963,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
     request(HttpApi.purchaseInstoreSave, params).then((result) {
       if (!mounted) return;
       Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      // 保存成功后重建基线，避免后续跳转/停留被误判为未保存
+      _refreshSnapshot();
       final retData = result['data'];
       if (retData is Map<String, dynamic>) {
         if (_isEdit) {
@@ -858,6 +985,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         if (withSign) {
           _doSignAfterSave(retData);
         }
+        if (popAfterSave && !withSign && mounted) Navigator.pop(context, true);
       } else {
         if (!_isEdit) Navigator.pop(context, true);
       }
@@ -939,10 +1067,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
       raw['orderqty'] = qty;
       raw['cyqty'] = 0;
 
-      // 进价（cgprice 优先，为空或为 0 时回退档案进价，对齐选择页取值规则）
-      final double orderCgprice = double.tryParse(raw['cgprice']?.toString() ?? '') ?? 0;
-      final double price =
-          orderCgprice != 0 ? orderCgprice : (double.tryParse(raw['price']?.toString() ?? '') ?? 0);
+      // 进价：特价入库保留原单价格，普通入库采购价优先（对齐 PC handleProperty）
+      final double price = _savedPrice(raw);
 
       // 赠送数量
       final double giftqty =
@@ -1439,11 +1565,10 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
         if (list.isNotEmpty) {
           final prod = list.first as Map<String, dynamic>;
-          final batchPrice = MathUtils.formatDecimalNum(
-              2,
-              double.tryParse(
-                      (item['price'] ?? prod['cgprice'] ?? prod['price'] ?? 0).toString()) ??
-                  0);
+          // 语音带价格时优先用语音价格，否则按单据类型取价（特价入库取促销进价）
+          final voicePrice = double.tryParse(item['price']?.toString() ?? '') ?? 0;
+          final batchPrice =
+              MathUtils.formatDecimalNum(2, voicePrice != 0 ? voicePrice : _entryPrice(prod));
           final batchQty = MathUtils.formatDecimalNum(
               1, double.tryParse((item['quantity'] ?? 1).toString()) ?? 1);
           setState(() {
@@ -1551,7 +1676,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1561,7 +1686,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? (_isSigned ? '采购入库详情' : '修改采购入库') : '新增采购入库',
@@ -1575,6 +1700,13 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
       body: _detailLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : _buildBody(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1639,6 +1771,9 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       child: _DetailItem(
+                        // 按行身份加 Key：扫码新增行 insert(0) 后列表错位，
+                        // 无 Key 时 State 按索引复用会导致失焦监听器与新行错位（部分行失焦不格式化/不恢复焦点）
+                        key: ValueKey<_DetailRow>(_items[index]),
                         row: _items[index],
                         index: index,
                         isSelectMode: _isSelectMode,
@@ -1646,8 +1781,10 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
                         readOnly: _readOnly,
                         bsid: _storeid,
                         counterid: _counterid,
+                        billtype: _billtype,
                         onToggle: () => _toggleIndex(index),
                         onChanged: () => setState(() {}),
+                        onQtyBlur: _returnFocusToScanIfIdle,
                       ),
                     ),
                   ),
@@ -1776,7 +1913,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
                             // 固定扫描（Web 调试用，对齐预盘单页面）
                             if (Device.isWeb) ...[
                               GestureDetector(
-                                onTap: () => _handleScannedBarcode('00002'),
+                                onTap: () => _handleScannedBarcode('6976711206519'),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
@@ -1999,6 +2136,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         _buildReadonlyField(label: '入库仓库', value: _warehouseController.text),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
+        _buildReadonlyField(label: '单据类型', value: _billtypeName),
+        const Divider(height: 1, color: Color(0xFFF3F4F6)),
         _buildReadonlyField(label: '原单号', value: _refbillnoController.text),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         _buildReadonlyField(label: '经手人', value: _buyerController.text),
@@ -2038,8 +2177,13 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           required: true,
           value: _storeController.text,
           onTap: () async {
-            final result =
-                await SelectStorePage.show(context, initialSelectedId: _storeid?.toString());
+            // 对齐 Vue instore/edit.vue：登录门店 supflag==1 时才传 supflag（...(store.supflag == 1 ? { supflag: 1 } : {})）
+            final supflag = SelectStorePage.loginStoreField('supflag') == '1' ? '1' : null;
+            final result = await SelectStorePage.show(
+              context,
+              initialSelectedId: _storeid?.toString(),
+              supflag: supflag,
+            );
             if (result != null && mounted) {
               setState(() {
                 _storeid = int.tryParse(result['storeid']?.toString() ?? '');
@@ -2081,6 +2225,14 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         ),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         SelectFieldItem(
+          label: '单据类型',
+          value: _billtypeName,
+          // 已保存（有 billid）后禁止再切换单据类型，仅新增未保存态可切换（对齐 PC instore/edit.vue）
+          enabled: !_isEdit,
+          onTap: _pickBilltype,
+        ),
+        const Divider(height: 1, color: Color(0xFFF3F4F6)),
+        SelectFieldItem(
           label: '原单号',
           value: _refbillnoController.text,
           onTap: () => _onTapRefbill(),
@@ -2114,17 +2266,14 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
 
   /// 原单号选择（新增模式有清空确认弹窗，编辑模式直接选择）
   Future<void> _onTapRefbill() async {
-    // 对齐 Vue canNothandleFnT：选择原单前置校验（供应商/机构/仓库）
-    if (_refbilltype != 2 && (_supid == null || _supid!.isEmpty)) {
-      Toast.show('必须选择供应商后才能选择商品！');
-      return;
-    }
+    // 对齐 Vue canNotReqOrder：引用单据不校验货商，允许未选供应商时先选上游单据，
+    // 选定后由 _fillItemsFromBillInfo 回填货商；仅校验机构/仓库
     if (_storeid == null) {
-      Toast.show('必须选择入库机构后才能选择商品！');
+      Toast.show('必须选择入库机构后才能选择单据！');
       return;
     }
     if (_counterid == null || _counterid!.isEmpty) {
-      Toast.show('必须选择入库仓库后才能选择商品！');
+      Toast.show('必须选择入库仓库后才能选择单据！');
       return;
     }
     if (!_isEdit) {
@@ -2543,18 +2692,16 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
                   1, double.tryParse((prod['qty'] ?? 1).toString()) ?? 1);
               final newGiftqty = MathUtils.formatDecimalNum(
                   1, double.tryParse((prod['giftqty'] ?? 0).toString()) ?? 0);
-              // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
-              final syncCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
-              final newPrice = MathUtils.formatDecimalNum(
-                  2,
-                  syncCgprice != 0
-                      ? syncCgprice
-                      : (double.tryParse(prod['price']?.toString() ?? '') ?? 0));
+              // 按单据类型取价：特价入库优先促销进价（对齐 PC handleProperty）
+              final newPrice = MathUtils.formatDecimalNum(2, _entryPrice(prod));
               // 优先使用返回数据中的 amt（选择页面已同步计算），否则按 qty × price 计算
+              // 促销进价覆盖时按新价格重算金额，避免选品页带回的金额与价格不一致
               final prodAmtVal = prod['amt'];
-              final newAmt = prodAmtVal != null
-                  ? (double.tryParse(prodAmtVal.toString()) ?? MathUtils.mul(newQty, newPrice))
-                  : MathUtils.mul(newQty, newPrice);
+              final newAmt = _usePromotionPrice(prod)
+                  ? MathUtils.mul(newQty, newPrice)
+                  : (prodAmtVal != null
+                      ? (double.tryParse(prodAmtVal.toString()) ?? MathUtils.mul(newQty, newPrice))
+                      : MathUtils.mul(newQty, newPrice));
               final batchno = prod['batchno']?.toString() ?? '';
               row.prodid = prodId;
               row.nameController.text =
@@ -2568,31 +2715,25 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
               row.barcodeController.text =
                   prod['barcode']?.toString() ?? prod['selfbarcode']?.toString() ?? '';
               row.amt = MathUtils.formatDecimalNum(3, newAmt);
+              row.stockqty = MathUtils.formatDecimalNum(
+                  1, double.tryParse(prod['stockqty']?.toString() ?? '') ?? 0);
               row.rawData = Map<String, dynamic>.from(prod);
               continue;
             }
           }
 
           final batchno = prod['batchno']?.toString() ?? '';
-          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
-          final rowCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
-          final price = MathUtils.formatDecimalNum(
-              2,
-              rowCgprice != 0
-                  ? rowCgprice
-                  : (double.tryParse(prod['price']?.toString() ?? '') ?? 0));
+          // 按单据类型取价：特价入库优先促销进价（对齐 PC handleProperty）
+          final price = MathUtils.formatDecimalNum(2, _entryPrice(prod));
           final qty =
               MathUtils.formatDecimalNum(1, double.tryParse((prod['qty'] ?? 1).toString()) ?? 1);
           final giftqty = MathUtils.formatDecimalNum(
               1, double.tryParse((prod['giftqty'] ?? 0).toString()) ?? 0);
-          // 优先使用返回数据中的 amt（选择页面已同步计算），否则现场计算
-          double amt;
+          // 优先使用返回数据中的 amt（选择页面已同步计算），促销进价覆盖时按新价格重算
           final prodAmt = prod['amt'];
-          if (prodAmt != null) {
-            amt = double.tryParse(prodAmt.toString()) ?? MathUtils.mul(qty, price);
-          } else {
-            amt = MathUtils.mul(qty, price);
-          }
+          final amt = !_usePromotionPrice(prod) && prodAmt != null
+              ? (double.tryParse(prodAmt.toString()) ?? MathUtils.mul(qty, price))
+              : MathUtils.mul(qty, price);
           _items.insert(
               0,
               _DetailRow()
@@ -2607,6 +2748,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
                 ..barcodeController.text =
                     prod['barcode']?.toString() ?? prod['selfbarcode']?.toString() ?? ''
                 ..amt = MathUtils.formatDecimalNum(3, amt)
+                ..stockqty = MathUtils.formatDecimalNum(
+                    1, double.tryParse(prod['stockqty']?.toString() ?? '') ?? 0)
                 ..rawData = Map<String, dynamic>.from(prod));
         }
       });
@@ -2707,11 +2850,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
         if (scaleInfo?.type == 'weight') {
           qtyDelta = scaleInfo!.qty ?? 1;
         } else if (scaleInfo?.type == 'amount') {
-          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
-          final scaleCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
-          final price = scaleCgprice != 0
-              ? scaleCgprice
-              : (double.tryParse(prod['price']?.toString() ?? '') ?? 0);
+          // 按单据类型取价：特价入库优先促销进价（对齐 PC handleProperty）
+          final price = _entryPrice(prod);
           qtyDelta = price > 0 ? (scaleInfo!.amount ?? 0) / price : 1;
         } else {
           qtyDelta = 1;
@@ -2753,13 +2893,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           }
         }
         if (!duplicated) {
-          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
-          final scanCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
-          final price = MathUtils.formatDecimalNum(
-              2,
-              scanCgprice != 0
-                  ? scanCgprice
-                  : (double.tryParse(prod['price']?.toString() ?? '') ?? 0));
+          // 按单据类型取价：特价入库优先促销进价（对齐 PC handleProperty）
+          final price = MathUtils.formatDecimalNum(2, _entryPrice(prod));
           final qty = MathUtils.formatDecimalNum(1, qtyDelta);
           final batchno = prod['batchno']?.toString() ?? '';
           final row = _DetailRow()
@@ -2843,6 +2978,51 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
     });
   }
 
+  /// 明细行数量失焦后焦点"落空"（收起键盘、点按非输入区域等）时，将焦点恢复到红外扫描框，
+  /// 支持连续扫码；焦点已落到其他输入框（用户主动点按单价/赠送/其他行等）时不干预，避免打断手工编辑
+  void _returnFocusToScanIfIdle() {
+    debugPrint('[焦点恢复] 进入 _returnFocusToScanIfIdle: _showScanBox=$_showScanBox, '
+        'scanContinuous=${_scanSettings.scanContinuous}, showInfraredInput=${_scanSettings.showInfraredInput}');
+    if (!_showScanBox) {
+      debugPrint('[焦点恢复] 中断：扫描框未渲染（_showScanBox=false）');
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanBox) {
+        debugPrint('[焦点恢复] 中断：mounted=$mounted, _showScanBox=$_showScanBox');
+        return;
+      }
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        debugPrint('[焦点恢复] 中断：当前路由非顶层（弹窗/子页面覆盖中）');
+        return;
+      }
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      debugPrint('[焦点恢复] 帧后检查：primaryFocus=${_describeFocus(primaryFocus)}');
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) {
+        debugPrint('[焦点恢复] 中断：焦点仍在其他控件上，不干预');
+        return;
+      }
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      debugPrint('[焦点恢复] 成功：焦点已回到红外扫描框');
+    });
+  }
+
+  /// 调试用：描述当前焦点节点归属（扫描框/行输入框/Scope/其他）
+  String _describeFocus(FocusNode? node) {
+    if (node == null) return 'null';
+    if (node == _scanFocusNode) return '扫描输入框';
+    if (node is FocusScopeNode) return 'FocusScope(无具体控件)';
+    for (final row in _items) {
+      if (node == row.qtyFocusNode) return '行数量输入框(${row.prodid})';
+      if (node == row.priceFocusNode) return '行进价输入框(${row.prodid})';
+      if (node == row.giftQtyFocusNode) return '行赠送输入框(${row.prodid})';
+    }
+    return node.toString();
+  }
+
   // =================== 条码扫描处理 ===================
   /// 处理条码：根据条码搜索商品，取第一条赋值给当前行，然后新增空行并转移焦点
   void _processBarcode(int rowIndex) {
@@ -2873,10 +3053,8 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           row.nameController.text =
               prod['productname']?.toString() ?? prod['name']?.toString() ?? '';
           row.qtyController.text = '1';
-          // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
-          final bcCgprice = double.tryParse(prod['cgprice']?.toString() ?? '') ?? 0;
-          row.priceController.text =
-              bcCgprice != 0 ? prod['cgprice'].toString() : (prod['price'] ?? 0).toString();
+          // 按单据类型取价：特价入库优先促销进价（对齐 PC handleProperty）
+          row.priceController.text = MathUtils.formatDecimal(2, _entryPrice(prod));
           row.batchno = prod['batchno']?.toString() ?? '';
           row.giftQtyController.text = '0';
           row.prodid = prod['prodid']?.toString() ?? prod['productid']?.toString() ?? '';
@@ -3124,6 +3302,83 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
     );
   }
 
+  /// 选择单据类型（1 采购入库 / 3 特价入库，对齐 PC instore/edit.vue）
+  /// 特价入库仅影响后续录入商品的价格默认值，不重算已有行（与 PC 端一致）
+  Future<void> _pickBilltype() async {
+    // 已保存单据禁止切换单据类型（按钮已置灰，此处兜底）
+    if (_isEdit) return;
+    const options = [
+      {'value': 1, 'label': '采购入库'},
+      {'value': 3, 'label': '特价入库'},
+    ];
+    final result = await showModalBottomSheet<int>(
+      context: context,
+      builder: (ctx) => Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(ctx).size.height * 0.6,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: const BoxDecoration(
+                border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
+              ),
+              child: Row(
+                children: [
+                  const Text('单据类型', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () => Navigator.pop(ctx),
+                    child: const Icon(Icons.close, size: 20, color: Color(0xFF6B7280)),
+                  ),
+                ],
+              ),
+            ),
+            for (final opt in options)
+              ListTile(
+                title: Text(opt['label']! as String),
+                trailing: _billtype == opt['value']
+                    ? const Icon(Icons.check, size: 18, color: Color(0xFF006EFF))
+                    : null,
+                onTap: () => Navigator.pop(ctx, opt['value']! as int),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (result != null && mounted) {
+      _applyBilltypeChange(result);
+    }
+  }
+
+  /// 单据类型切换的取价策略（对齐 PC instore/edit.vue 的 billtypeChange）：
+  /// 切回采购入库不走任何中转快照（行级临时快照随保存丢失，再打开时无法还原），
+  /// 统一按 档案进价 cgprice → 原进价 oldprice → 行上当前价 兜底，取不到时保持当前价，
+  /// 避免把无档案价的商品置 0；切入特价入库仅在有促销进价时覆盖
+  void _applyBilltypeChange(int newBilltype) {
+    final isSpecial = newBilltype == 3;
+    for (final row in _items) {
+      if ((row.prodid ?? '').isEmpty) continue;
+      final raw = row.rawData ?? <String, dynamic>{};
+      final cgprice = double.tryParse(raw['cgprice']?.toString() ?? '') ?? 0;
+      final promotioninprice = double.tryParse(raw['promotioninprice']?.toString() ?? '') ?? 0;
+      final oldprice = double.tryParse(raw['oldprice']?.toString() ?? '') ?? 0;
+      final curPrice = double.tryParse(row.priceController.text) ?? 0;
+      // 默认取价策略：档案进价优先，其次原进价，最后沿用行上当前价
+      var nextPrice = cgprice != 0 ? cgprice : (oldprice != 0 ? oldprice : curPrice);
+      // 切入特价入库：有促销进价才覆盖，无促销价沿用常规进价
+      if (isSpecial && promotioninprice > 0) nextPrice = promotioninprice;
+      // 价格未变化不重写，避免无谓地清掉用户手动调整过的金额
+      if (curPrice == nextPrice) continue;
+      row.priceController.text = MathUtils.formatDecimal(2, nextPrice);
+      final qty = double.tryParse(row.qtyController.text) ?? 0;
+      row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, nextPrice));
+    }
+    setState(() => _billtype = newBilltype);
+  }
+
   /// 只读字段行（布局参数与 SelectFieldItem 等表单字段一致：标签宽 80、字号 14、行高 24 + 上下 12）
   Widget _buildReadonlyField({required String label, required String value}) {
     return Padding(
@@ -3277,6 +3532,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           initialRemark: raw['remark']?.toString() ?? '',
           bsid: _storeid,
           counterid: _counterid,
+          billtype: _billtype,
         ),
       ),
     );
@@ -3291,6 +3547,10 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
             qty == qty.toInt() ? qty.toInt().toString() : qty.toStringAsFixed(2);
         row.giftQtyController.text = giftQty.toInt().toString();
         row.batchno = result['batchno']?.toString() ?? '';
+        row.batchController.text = row.batchno ?? '';
+        if (result['stockqty'] != null) {
+          row.stockqty = (result['stockqty'] as num).toDouble();
+        }
         // 金额：优先取弹窗返回值（用户手动修改过金额则反算进价），否则 qty * price
         row.amt =
             newAmt != 0 ? newAmt : MathUtils.formatDecimalNum(3, MathUtils.mul(qty, newPrice));
@@ -3301,6 +3561,7 @@ class _PurchaseInstoreAddPageState extends State<PurchaseInstoreAddPage> {
           'amt': row.amt,
           'sellprice': result['sellprice'],
           'sellamt': result['sellamt'],
+          if (result['stockqty'] != null) 'stockqty': row.stockqty,
           'batchno': result['batchno']?.toString() ?? '',
           'giftqty': giftQty,
           'presentqty': giftQty,
@@ -3373,9 +3634,57 @@ class _DetailRow {
   }
 }
 
+/// 等级价格推导（对齐 Web 商品档案 priceRateBlur、采购入库 writeData）：
+/// 会员价2/3、批发价2/3 按系统参数配置的等级加价率 × 进价计算，未配置等级加价率时沿用等级1价格
+void _syncLevelPrice(
+  Map<String, dynamic> data,
+  String key, {
+  double? price,
+  double? sellprice,
+}) {
+  Map<String, dynamic> cfg = {};
+  try {
+    final cfgStr = SpUtil.getString(Constant.loginParamResp) ?? '';
+    if (cfgStr.isNotEmpty) cfg = jsonDecode(cfgStr) as Map<String, dynamic>;
+  } catch (_) {}
+  // 自动加价开关（productAutoPrice[4]==1）未开启时不处理，对齐 Web writeData
+  final flags = (cfg['productAutoPrice']?.toString() ?? '').split('');
+  if (flags.length < 5 || flags[4] != '1') return;
+  // 加价基准：相对进价(1)时改进价触发；相对零售价(2)时改零售价触发
+  final productGentPrice = cfg['productGentPrice']?.toString() ?? '';
+  if (!((productGentPrice == '1' && key == 'price') ||
+      (productGentPrice == '2' && key == 'sellprice'))) {
+    return;
+  }
+  final p = price ?? double.tryParse(data['price']?.toString() ?? '') ?? 0;
+  final sp = sellprice ??
+      double.tryParse(
+        data['sellprice']?.toString() ?? data['retailprice']?.toString() ?? '',
+      ) ??
+      0;
+  // 等级2/3统一以进价为基准，进价为空才退回零售价
+  final levelBase = p > 0 ? p : sp;
+  if (levelBase <= 0) return;
+  String? calcLevelPrice(dynamic rate) {
+    final r = double.tryParse(rate?.toString() ?? '') ?? 0;
+    if (r <= 0) return null;
+    return MathUtils.formatDecimal(2, MathUtils.mul(levelBase, MathUtils.divide(r, 100)));
+  }
+
+  final memberPriceLevel = int.tryParse(cfg['memberPriceLevel']?.toString() ?? '') ?? 3;
+  final pfPriceLevel = int.tryParse(cfg['pfPriceLevel']?.toString() ?? '') ?? 3;
+  final mprice1 = data['mprice1']?.toString() ?? data['mprice']?.toString() ?? '';
+  final pfprice1 = data['pfprice1']?.toString() ?? data['pfprice']?.toString() ?? '';
+  if (memberPriceLevel > 2) data['mprice2'] = calcLevelPrice(cfg['productVipPrice2']) ?? mprice1;
+  if (memberPriceLevel == 3) data['mprice3'] = calcLevelPrice(cfg['productVipPrice3']) ?? mprice1;
+  if (pfPriceLevel >= 2) data['pfprice2'] = calcLevelPrice(cfg['productPfPrice2']) ?? pfprice1;
+  if (pfPriceLevel == 3) data['pfprice3'] = calcLevelPrice(cfg['productPfPrice3']) ?? pfprice1;
+}
+
 /// 明细行独立 Widget，配合 SliverList.builder 实现懒加载
 class _DetailItem extends StatefulWidget {
   const _DetailItem({
+    super.key,
     required this.row,
     required this.index,
     this.isSelectMode = false,
@@ -3383,8 +3692,10 @@ class _DetailItem extends StatefulWidget {
     this.readOnly = false,
     this.bsid,
     this.counterid,
+    this.billtype = 1,
     required this.onToggle,
     this.onChanged,
+    this.onQtyBlur,
   });
   final _DetailRow row;
   final int index;
@@ -3393,10 +3704,14 @@ class _DetailItem extends StatefulWidget {
   final bool readOnly;
   final int? bsid;
   final String? counterid;
+  final int billtype;
   final VoidCallback onToggle;
 
   /// 失焦回调：行金额格式化/重算完成后通知父页面刷新底部合计
   final VoidCallback? onChanged;
+
+  /// 数量失焦回调：父页面在焦点落空时将焦点恢复到扫描框
+  final VoidCallback? onQtyBlur;
 
   @override
   State<_DetailItem> createState() => _DetailItemState();
@@ -3419,8 +3734,21 @@ class _DetailItemState extends State<_DetailItem> {
   @override
   void initState() {
     super.initState();
-    _onPriceBlur = () => _formatField(widget.row.priceFocusNode, _priceCtrl, 2);
-    _onQtyBlur = () => _formatField(widget.row.qtyFocusNode, _qtyCtrl, 1);
+    _onPriceBlur = () {
+      _formatField(widget.row.priceFocusNode, _priceCtrl, 2);
+      if (widget.row.priceFocusNode.hasFocus) return;
+      // 进价失焦后按系统参数推导会员价2/3、批发价2/3（对齐 Web writeData）
+      final raw = widget.row.rawData;
+      if (raw != null) _syncLevelPrice(raw, 'price');
+    };
+    _onQtyBlur = () {
+      _formatField(widget.row.qtyFocusNode, _qtyCtrl, 1);
+      // 数量失焦后通知父页面评估恢复扫描框焦点（连续扫码）
+      if (!widget.row.qtyFocusNode.hasFocus) {
+        debugPrint('[焦点恢复] 行数量失焦监听触发：prodid=${widget.row.prodid}');
+        widget.onQtyBlur?.call();
+      }
+    };
     _onGiftBlur = () => _formatField(widget.row.giftQtyFocusNode, _giftQtyCtrl, 1);
     widget.row.priceFocusNode.addListener(_onPriceBlur);
     widget.row.qtyFocusNode.addListener(_onQtyBlur);
@@ -3510,6 +3838,7 @@ class _DetailItemState extends State<_DetailItem> {
           initialRemark: raw['remark']?.toString() ?? '',
           bsid: widget.bsid,
           counterid: widget.counterid,
+          billtype: widget.billtype,
         ),
       ),
     );
@@ -3524,6 +3853,11 @@ class _DetailItemState extends State<_DetailItem> {
           : qty.toStringAsFixed(4).replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
       _giftQtyCtrl.text = giftqty.toInt().toString();
       _batchCtrl.text = result['batchno']?.toString() ?? '';
+      if (result['stockqty'] != null) {
+        widget.row.stockqty = (result['stockqty'] as num).toDouble();
+        widget.row.rawData ??= {};
+        widget.row.rawData!['stockqty'] = widget.row.stockqty;
+      }
       // 金额：优先取弹窗返回值，否则 qty * price
       widget.row.amt =
           newAmt != 0 ? newAmt : MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
@@ -3539,6 +3873,8 @@ class _DetailItemState extends State<_DetailItem> {
         if (result['size'] != null) widget.row.rawData!['size'] = result['size'];
         if (result['unitonlyid'] != null) widget.row.rawData!['unitonlyid'] = result['unitonlyid'];
         if (result['sizeonlyid'] != null) widget.row.rawData!['sizeonlyid'] = result['sizeonlyid'];
+        // 切换单位后同步商品名称：行数据与列表名称输入框
+        applyProductName(widget.row.rawData, result, nameController: widget.row.nameController);
       }
       _notifyChange();
       setState(() {});
@@ -3785,6 +4121,7 @@ class _ProDetailSheet extends StatefulWidget {
     required this.initialRemark,
     this.bsid,
     this.counterid,
+    this.billtype = 1,
   });
   final Map<String, dynamic> productData;
   final double initialPrice;
@@ -3803,6 +4140,9 @@ class _ProDetailSheet extends StatefulWidget {
   final int? bsid;
   final String? counterid;
 
+  /// 单据类型：3 特价入库时切换单位/规格优先取促销进价
+  final int billtype;
+
   @override
   State<_ProDetailSheet> createState() => _ProDetailSheetState();
 }
@@ -3817,6 +4157,13 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
   late TextEditingController _birthdateCtrl;
   late TextEditingController _validdateCtrl;
   late TextEditingController _remarkCtrl;
+
+  /// 进价/零售价焦点：失焦时推导会员价2/3、批发价2/3（对齐 Web writeData）
+  final FocusNode _priceFocusNode = FocusNode();
+  final FocusNode _sellpriceFocusNode = FocusNode();
+
+  // 仅在确认选择批次后回传库存；取消或未选择批次时保留原行库存。
+  double? _batchStockqty;
 
   /// 金额是否被用户手动修改（对齐 Vue writeData 的 _amtManual）
   bool _amtManual = false;
@@ -3842,11 +4189,28 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     return productid.isNotEmpty && _sizeonlyid.isEmpty;
   }
 
-  /// 规格可选条件（对齐 Vue edit.vue size 列：v-if="row.specflag == 1 && !row.unitonlyid"）
+  /// 规格可选条件：采购单据暂不启用规格选择器，仅展示规格文本（与 PC 端 edit.vue 屏蔽 #size 插槽一致）；
+  /// 原条件为 specflag == '1' && _unitonlyid.isEmpty（对齐 Vue edit.vue size 列），恢复规格选择时按此还原
   bool get _sizeCanSelect {
-    final data = widget.productData;
-    final specflag = data['specflag']?.toString() ?? '';
-    return specflag == '1' && _unitonlyid.isEmpty;
+    return false;
+  }
+
+  /// 不管理有效期的商品禁止录入批次和日期（参数：purchase.nobatchproductbnxr）：
+  /// 参数开启且商品档案 validflag==0 时，批次/生产日期/有效日期禁止录入
+  late final bool _noBatchInput = _calcNoBatchInput();
+
+  bool _calcNoBatchInput() {
+    final cfgStr = SpUtil.getString(Constant.loginParamResp) ?? '';
+    if (cfgStr.isEmpty) {
+      return false;
+    }
+    try {
+      final cfg = jsonDecode(cfgStr) as Map<String, dynamic>;
+      return int.tryParse(cfg['nobatchproductbnxr']?.toString() ?? '0') == 1 &&
+          widget.productData['validflag']?.toString() == '0';
+    } catch (_) {
+      return false;
+    }
   }
 
   @override
@@ -3869,8 +4233,9 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     _sellpriceCtrl = TextEditingController(text: spVal.toStringAsFixed(2));
     _amtCtrl = TextEditingController(text: MathUtils.formatDecimal(3, widget.initialAmt));
     _batchCtrl = TextEditingController(text: widget.initialBatch);
-    _birthdateCtrl = TextEditingController(text: widget.initialBirthdate);
-    _validdateCtrl = TextEditingController(text: widget.initialValiddate);
+    // 详情接口返回的日期可能带时分秒，统一按 YYYY-MM-DD 展示（对齐 Vue）
+    _birthdateCtrl = TextEditingController(text: _formatBatchDate(widget.initialBirthdate));
+    _validdateCtrl = TextEditingController(text: _formatBatchDate(widget.initialValiddate));
     _remarkCtrl = TextEditingController(text: widget.initialRemark);
     // 初始化单位/规格状态
     _currentUnit = widget.productData['unit']?.toString() ?? '';
@@ -3885,6 +4250,9 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     _sellpriceCtrl.addListener(_onSellpriceChanged);
     // 金额输入 → 标记手动修改（对齐 Vue writeData key==amt 的 _amtManual）
     _amtCtrl.addListener(_onAmtChanged);
+    // 进价/零售价失焦 → 按系统参数推导等级会员价/批发价
+    _priceFocusNode.addListener(_onPriceFocusChanged);
+    _sellpriceFocusNode.addListener(_onSellpriceFocusChanged);
     _syncSellamt();
   }
 
@@ -3899,6 +4267,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     _birthdateCtrl.dispose();
     _validdateCtrl.dispose();
     _remarkCtrl.dispose();
+    _priceFocusNode.dispose();
+    _sellpriceFocusNode.dispose();
     super.dispose();
   }
 
@@ -3921,6 +4291,26 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
   void _onAmtChanged() {
     if (_updatingAmt) return;
     _amtManual = true;
+  }
+
+  /// 进价失焦：按系统参数推导等级会员价2/3、批发价2/3
+  void _onPriceFocusChanged() {
+    if (!_priceFocusNode.hasFocus && mounted) _applyLevelPrice('price');
+  }
+
+  /// 零售价失焦：同上（相对零售价加价模式下触发）
+  void _onSellpriceFocusChanged() {
+    if (!_sellpriceFocusNode.hasFocus && mounted) _applyLevelPrice('sellprice');
+  }
+
+  /// 等级价格推导：以输入框当前值为准（行数据在确认后才回写 productData）
+  void _applyLevelPrice(String key) {
+    _syncLevelPrice(
+      widget.productData,
+      key,
+      price: double.tryParse(_priceCtrl.text),
+      sellprice: double.tryParse(_sellpriceCtrl.text),
+    );
   }
 
   /// 金额自动重算（对齐 Vue writeData：!v._amtManual 时 amt = qty × price）
@@ -3950,7 +4340,26 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     _priceCtrl.text = MathUtils.formatDecimal(2, MathUtils.divide(amt, q));
   }
 
-  Future<void> _pickDate(TextEditingController ctrl) async {
+  /// 保质期商品：生产日期 + 保质天数（validday）计算有效日期（对齐 Vue handleBillBirthdate 正向）
+  String _calcValidDate(String birthdate) {
+    final d = DateTime.tryParse(birthdate);
+    if (d == null) return '';
+    final days = (num.tryParse(widget.productData['validday']?.toString() ?? '') ?? 0).toInt();
+    final v = d.add(Duration(days: days));
+    return '${v.year}-${v.month.toString().padLeft(2, '0')}-${v.day.toString().padLeft(2, '0')}';
+  }
+
+  /// 保质期商品：有效日期 - 保质天数（validday）反算生产日期（对齐 Vue handleBillBirthdate 反向）
+  String _calcBirthdate(String validdate) {
+    final d = DateTime.tryParse(validdate);
+    if (d == null) return '';
+    final days = (num.tryParse(widget.productData['validday']?.toString() ?? '') ?? 0).toInt();
+    final v = d.subtract(Duration(days: days));
+    return '${v.year}-${v.month.toString().padLeft(2, '0')}-${v.day.toString().padLeft(2, '0')}';
+  }
+
+  /// 日期选择；生产日期（isBirthdate=true）/有效日期双向联动（对齐 Vue handleBillBirthdate）
+  Future<void> _pickDate(TextEditingController ctrl, {bool isBirthdate = false}) async {
     DateTime initial;
     try {
       initial = ctrl.text.isNotEmpty ? DateTime.parse(ctrl.text) : DateTime.now();
@@ -4052,8 +4461,21 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     if (date != null && mounted) {
       final mo = date.month.toString().padLeft(2, '0');
       final dy = date.day.toString().padLeft(2, '0');
+      final dateStr = '${date.year}-$mo-$dy';
       setState(() {
-        ctrl.text = '${date.year}-$mo-$dy';
+        ctrl.text = dateStr;
+        // 保质期商品（validflag == 1）且有 validday：联动计算对方日期（对齐 Vue handleBillBirthdate）；
+        // 对方字段已有值时保留，不覆盖手动修改的日期
+        final validday = num.tryParse(widget.productData['validday']?.toString() ?? '') ?? 0;
+        if (widget.productData['validflag']?.toString() == '1' && validday > 0) {
+          if (isBirthdate) {
+            if (_validdateCtrl.text.trim().isEmpty) {
+              _validdateCtrl.text = _calcValidDate(dateStr);
+            }
+          } else if (_birthdateCtrl.text.trim().isEmpty) {
+            _birthdateCtrl.text = _calcBirthdate(dateStr);
+          }
+        }
       });
     }
   }
@@ -4178,14 +4600,22 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                     // 规格（可点击选择，对齐 Vue proDetails.vue size 字段）
                     _buildSizeSelectField(),
                     _buildDivider(),
-                    _buildFormField(label: '采购进价', controller: _priceCtrl, isDecimal: true),
+                    _buildFormField(
+                        label: '采购进价',
+                        controller: _priceCtrl,
+                        isDecimal: true,
+                        focusNode: _priceFocusNode),
                     _buildDivider(),
                     _buildFormField(label: '入库数量', controller: _qtyCtrl, isDecimal: true),
                     _buildDivider(),
                     _buildFormField(label: '赠送数量', controller: _giftCtrl),
                     _buildDivider(),
                     // 零售价（对齐 Vue edit.vue sellprice，变化时联动重算金额）
-                    _buildFormField(label: '零售价', controller: _sellpriceCtrl, isDecimal: true),
+                    _buildFormField(
+                        label: '零售价',
+                        controller: _sellpriceCtrl,
+                        isDecimal: true,
+                        focusNode: _sellpriceFocusNode),
                     _buildDivider(),
                     // 金额（对齐 Vue edit.vue amt，编辑后回车反算进价）
                     _buildFormField(
@@ -4198,7 +4628,9 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                     // 商品批次（使用 SelectBatchSheet 选择，带出日期）
                     _buildBatchSelectField(),
                     _buildDivider(),
-                    _buildDateField(label: '生产日期', ctrl: _birthdateCtrl),
+                    // 生产日期/有效日期双向联动：保质期商品按 validday 计算对方日期，
+                    // 对方已有值则保留（对齐 Vue handleBillBirthdate 防覆盖）
+                    _buildDateField(label: '生产日期', ctrl: _birthdateCtrl, isBirthdate: true),
                     _buildDivider(),
                     _buildDateField(label: '有效日期', ctrl: _validdateCtrl),
                     _buildDivider(),
@@ -4255,6 +4687,7 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                               MathUtils.formatDecimalNum(3, double.tryParse(_amtCtrl.text) ?? 0.0),
                           'sellamt': _sellamt,
                           'batchno': _batchCtrl.text.trim(),
+                          if (_batchStockqty != null) 'stockqty': _batchStockqty,
                           'birthdate': _birthdateCtrl.text.trim(),
                           'validdate': _validdateCtrl.text.trim(),
                           'remark': _remarkCtrl.text.trim(),
@@ -4262,6 +4695,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                           'size': _currentSize,
                           'unitonlyid': _unitonlyid,
                           'sizeonlyid': _sizeonlyid,
+                          // 切换单位后的商品名称随弹窗返回，供列表回写
+                          ...unitNameFields(widget.productData),
                         });
                       },
                       style: ElevatedButton.styleFrom(
@@ -4290,6 +4725,7 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     bool isDecimal = false,
     TextInputType keyboardType = TextInputType.number,
     int maxLines = 1,
+    FocusNode? focusNode,
     ValueChanged<String>? onSubmitted,
   }) {
     return Padding(
@@ -4306,6 +4742,7 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
           Expanded(
             child: TextField(
               controller: controller,
+              focusNode: focusNode,
               maxLines: maxLines,
               keyboardType:
                   isDecimal ? const TextInputType.numberWithOptions(decimal: true) : keyboardType,
@@ -4327,11 +4764,13 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     );
   }
 
-  Widget _buildDateField({required String label, required TextEditingController ctrl}) {
+  Widget _buildDateField(
+      {required String label, required TextEditingController ctrl, bool isBirthdate = false}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: GestureDetector(
-        onTap: () => _pickDate(ctrl),
+        // 不管理有效期的商品禁止录入日期（参数：purchase.nobatchproductbnxr）
+        onTap: _noBatchInput ? null : () => _pickDate(ctrl, isBirthdate: isBirthdate),
         behavior: HitTestBehavior.opaque,
         child: Row(
           children: [
@@ -4347,12 +4786,17 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                 textAlign: TextAlign.right,
                 style: TextStyle(
                   fontSize: 14,
-                  color: ctrl.text.isNotEmpty ? const Color(0xFF111827) : const Color(0xFFD1D5DB),
+                  color: _noBatchInput
+                      ? const Color(0xFF6B7280)
+                      : ctrl.text.isNotEmpty
+                          ? const Color(0xFF111827)
+                          : const Color(0xFFD1D5DB),
                 ),
               ),
             ),
             const SizedBox(width: 4),
-            const Icon(Icons.chevron_right, size: 16, color: Color(0xFFD1D5DB)),
+            Icon(Icons.chevron_right,
+                size: 16, color: _noBatchInput ? const Color(0xFFE5E7EB) : const Color(0xFFD1D5DB)),
           ],
         ),
       ),
@@ -4400,6 +4844,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
               controller: _batchCtrl,
               keyboardType: TextInputType.text,
               textAlign: TextAlign.right,
+              // 不管理有效期的商品禁止录入批次（参数：purchase.nobatchproductbnxr）
+              readOnly: _noBatchInput,
               style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
               decoration: const InputDecoration(
                 border: InputBorder.none,
@@ -4412,39 +4858,45 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
           ),
           const SizedBox(width: 4),
           GestureDetector(
-            onTap: () async {
-              final productid = widget.productData['productid']?.toString() ??
-                  widget.productData['prodid']?.toString() ??
-                  '';
-              if (productid.isEmpty) {
-                Toast.show('商品信息异常');
-                return;
-              }
-              // 收起软键盘
-              FocusScope.of(context).unfocus();
-              final result = await showModalBottomSheet<Map<String, dynamic>>(
-                context: context,
-                isScrollControlled: true,
-                backgroundColor: Colors.transparent,
-                builder: (_) => SelectBatchSheet(
-                  productid: productid,
-                  bsid: (widget.bsid ?? '').toString(),
-                  counterid: widget.counterid ?? '',
-                  initialBatchNo: _batchCtrl.text,
-                ),
-              );
-              if (result != null && mounted) {
-                setState(() {
-                  _batchCtrl.text = result['batchno']?.toString() ?? '';
-                  // 选择批次后自动带出生产日期和有效期（对齐 web handleBatchConfirm）
-                  final birthdate = _formatBatchDate(result['birthdate']);
-                  _birthdateCtrl.text = birthdate;
-                  final validdate = _formatBatchDate(result['validdate']);
-                  _validdateCtrl.text = validdate.isEmpty ? birthdate : validdate;
-                });
-              }
-            },
-            child: const Icon(Icons.chevron_right, size: 20, color: Color(0xFFD1D5DB)),
+            // 不管理有效期的商品禁止录入批次（参数：purchase.nobatchproductbnxr）
+            onTap: _noBatchInput
+                ? null
+                : () async {
+                    final productid = widget.productData['productid']?.toString() ??
+                        widget.productData['prodid']?.toString() ??
+                        '';
+                    if (productid.isEmpty) {
+                      Toast.show('商品信息异常');
+                      return;
+                    }
+                    // 收起软键盘
+                    FocusScope.of(context).unfocus();
+                    final result = await showModalBottomSheet<Map<String, dynamic>>(
+                      context: context,
+                      isScrollControlled: true,
+                      backgroundColor: Colors.transparent,
+                      builder: (_) => SelectBatchSheet(
+                        productid: productid,
+                        bsid: (widget.bsid ?? '').toString(),
+                        counterid: widget.counterid ?? '',
+                        initialBatchNo: _batchCtrl.text,
+                      ),
+                    );
+                    if (result != null && mounted) {
+                      setState(() {
+                        _batchCtrl.text = result['batchno']?.toString() ?? '';
+                        _batchStockqty = MathUtils.formatDecimalNum(
+                            1, double.tryParse(result['stockqty']?.toString() ?? '') ?? 0);
+                        // 选择批次后自动带出生产日期和有效期（对齐 web handleBatchConfirm）
+                        final birthdate = _formatBatchDate(result['birthdate']);
+                        _birthdateCtrl.text = birthdate;
+                        final validdate = _formatBatchDate(result['validdate']);
+                        _validdateCtrl.text = validdate.isEmpty ? birthdate : validdate;
+                      });
+                    }
+                  },
+            child: Icon(Icons.chevron_right,
+                size: 20, color: _noBatchInput ? const Color(0xFFE5E7EB) : const Color(0xFFD1D5DB)),
           ),
         ],
       ),
@@ -4666,12 +5118,19 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
         _unitonlyid = result['unitonlyid']?.toString() ?? result['_id']?.toString() ?? '';
         data['unit'] = _currentUnit;
         data['unitonlyid'] = _unitonlyid;
-        // cgpriceflag 模式：unitConfirm 价格逻辑
+        // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+        syncUnitProductName(data, result, unitonlyid: _unitonlyid);
+        // cgpriceflag 模式：unitConfirm 价格逻辑（特价入库优先促销进价）
         final cgprice = result['cgprice']?.toString();
         if (cgprice != null) {
           data['cgprice'] = cgprice;
-          data['price'] = cgprice;
-          _priceCtrl.text = double.tryParse(cgprice)?.toStringAsFixed(2) ?? cgprice;
+          final promotionInprice =
+              double.tryParse(result['promotioninprice']?.toString() ?? '') ?? 0;
+          final price = widget.billtype == 3 && promotionInprice > 0
+              ? MathUtils.formatDecimal(2, promotionInprice)
+              : cgprice;
+          data['price'] = price;
+          _priceCtrl.text = double.tryParse(price)?.toStringAsFixed(2) ?? price;
         }
         final inprice = result['inprice']?.toString();
         if (inprice != null) data['inprice'] = inprice;
@@ -4718,12 +5177,17 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
         _sizeonlyid = result['sizeonlyid']?.toString() ?? result['_id']?.toString() ?? '';
         data['size'] = _currentSize;
         data['sizeonlyid'] = _sizeonlyid;
-        // 价格联动（对齐 Vue changeSize：cgprice/price、inprice、oldprice、批发价）
+        // 价格联动（对齐 Vue changeSize：cgprice/price、inprice、oldprice、批发价；特价入库优先促销进价）
         final cgprice = result['cgprice']?.toString();
         if (cgprice != null) {
           data['cgprice'] = cgprice;
-          data['price'] = cgprice;
-          _priceCtrl.text = double.tryParse(cgprice)?.toStringAsFixed(2) ?? cgprice;
+          final promotionInprice =
+              double.tryParse(result['promotioninprice']?.toString() ?? '') ?? 0;
+          final price = widget.billtype == 3 && promotionInprice > 0
+              ? MathUtils.formatDecimal(2, promotionInprice)
+              : cgprice;
+          data['price'] = price;
+          _priceCtrl.text = double.tryParse(price)?.toStringAsFixed(2) ?? price;
         }
         final inprice = result['inprice']?.toString();
         if (inprice != null) data['inprice'] = inprice;

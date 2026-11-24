@@ -8,14 +8,24 @@ class HttpApi {
   // static const String baseUrlYlx = 'http://192.168.8.43:9099/LxSvr/web/'; // 李宇智
   // static const String baseUrlYlx = 'http://192.168.8.62:9099/LxSvr/web/'; // 朱远杰
   // static const String baseUrlYlx = 'http://192.168.8.41:9099/LxSvr/web/'; // 杨潇
+  //static const String baseUrlYlx = 'http://192.168.8.48:9099/LxSvr/web/'; // ljh
   // static const String baseUrlYlx = 'http://dev.bypos.net/LxSvr/web/';
   static const String baseUrlYlx = 'https://yun.bypos.net/LxSvr/web/';
 
   /// 获取门店列表（登录第一步）
   static const String getLoginList = 'getLoginList';
-
+  static const String httpUtilGetGet = 'httpUtil/getGet'; // 通用GET代理（云商品库条码查询）
   /// 登录（登录第二步）
   static const String lxlogin = 'lxlogin';
+
+  /// 系统参数列表（App 启动时刷新登录相关数据：user/store/rolemap/loginParamResp）
+  static const String updateEmployeeStorePermission = 'updateEmployeeStorePermission';
+
+  /// 推送设备绑定接口（上报极光 RegistrationID 与用户信息）
+  static const String pushBindDevice = 'jpush/bind';
+
+  /// 推送设备解绑接口（退出登录时解绑 RegistrationID）
+  static const String pushUnbindDevice = 'jpush/unbind';
 
   /// 采购入库相关 API（灵犀系统）
   static const String purchaseInstoreList = 'cgstockin/findList';
@@ -41,8 +51,11 @@ class HttpApi {
   static const String sysUserUpdate = 'sysuser/update'; // 更新用户(旧)
   static const String sysUserGetRoleConfig = 'sysuser/getUserRoleConfig'; // 角色配置
   static const String roleFindList = 'role/findList'; // 角色列表
-  static const String productGetList = 'bi/product/getProductList'; // 商品列表
+  static const String productGetList = 'bi/product/getProductList'; // 商品列表（通用选品）
   static const String machineGetList = 'machine/getMachineList'; // 站点设备列表
+  static const String machineGetMachineSeatList = 'machine/getMachineSeatList'; // 收银站点授权列表
+  static const String machineBindMachineSeat = 'machine/bindMachineSeat'; // 站点绑定收银机
+  static const String machineUnbindMachineSeat = 'machine/unbindMachineSeat'; // 站点解绑收银机
   static const String machineCheck = 'machine/checkMachine'; // 站点校验
   static const String machineUpdate = 'machine/update'; // 站点更新
   static const String machineOperate = 'machine/operate'; // 站点操作（删除）
@@ -50,10 +63,20 @@ class HttpApi {
   static const String sysSeatBindSeat = 'sysseat/bindSeat'; // 绑定席位
   static const String sysSeatUnbindSeat = 'sysseat/unbindSeat'; // 解绑席位
   static const String sysSeatUpdateStop = 'sysseat/updateStop'; // 启用/停用
+  static const String vasGetVasList = 'vas/getVasList'; // 增值服务列表（席位信息 verid=712）
   static const String stockproductGetBacthList = 'stockproduct/getBacthList'; // 商品批次列表
   static const String itemClassGetList = 'bi/itemclass/getList'; // 商品分类列表
   static const String brandList = 'bi/brand/getBrandList'; // 品牌列表
   static const String locationGetList = 'bi/location/getList'; // 货架编号列表
+  static const String locationProductGetList = 'bi/location/product/getList'; // 货位商品列表（货位管理列表页）
+  static const String locationGet = 'bi/location/get'; // 货位详情（货位管理）
+  static const String locationAdd = 'bi/location/add'; // 新增货位
+  static const String locationUpdate = 'bi/location/update'; // 修改货位
+  static const String locationDelete = 'bi/location/delete'; // 删除货位（数组入参）
+  static const String locationProductDelete = 'bi/location/product/delete'; // 货位商品删除/解绑（数组入参）
+  static const String storageZoneGetList = 'bi/storageZone/getStorageZoneList'; // 库区列表
+  static const String productGetProductUnitList =
+      'bi/product/getProductUnitList'; // 商品包装单位列表（货位绑定商品）
   static const String typeGetListandCode = 'bi/type/getTypeListandCode'; // 分类树（含编码）
   static const String typeAddTypeInfo = 'bi/type/addTypeInfo'; // 新增分类
   static const String typeUpdateTypeInfo = 'bi/type/updateTypeInfo'; // 修改分类
@@ -263,6 +286,7 @@ class HttpApi {
   static const String saleSelectBillOperate =
       'saleselect/billOperate'; // 外卖拣货-领取任务等操作（operate=1 领取）
   static const String saleFindSaleFlowDeail = 'sale/findSaleFlowDeail'; // 收银流水详情
+  static const String saleFindSaleBillDetail = 'saleselect/findSaleBillDetail'; // 拣货详情
   static const String paywayGetList = 'bi/payway/getList'; // 支付方式列表
 
   /// 收银统计 API
@@ -527,6 +551,7 @@ class HttpApi {
   static const String promotionPlanSave = 'pt/master/addorupdatecp'; // 保存/更新促销计划
   static const String promotionPlanSign = 'pt/master/toExaminecp'; // 审核/撤回/反审核
   static const String promotionPlanDelete = 'pt/master/delete'; // 删除促销计划
+  static const String promotionPlanStatus = 'pt/master/status'; // 启用/终止促销调价单
 
   /// 门店调价单 API
   static const String storeChangePriceFindList = 'mp/findList'; // 门店调价单列表
@@ -541,6 +566,10 @@ class HttpApi {
   static const String getLabelBillDetail = 'app/labelprint/getLabelBillDetail'; // 获取单据明细
   static const String getPrintSet = 'wxprint/getPrintSet'; // 获取打印设置（含蓝牙配置）
   static const String savePrintSet = 'wxprint/savePrintSet'; // 保存打印设置（含蓝牙配置）
+  static const String getNoPrintList = 'labelprint/getNoPrintList'; // 获取未打印列表
+  static const String delNoPrintList = 'labelprint/delNoPrintList'; // 删除未打印数据
+  static const String updateNoPrintCopies = 'labelprint/updateNoPrintCopies'; // 修改未打印份数
+  static const String labelPrintRePrint = 'labelprint/rePrint'; // 重新打印未打印数据
 
   /// 商品分组 API
   static const String labelProductGroupFindList = 'labelproductgroup/findList'; // 商品分组列表
@@ -569,4 +598,10 @@ class HttpApi {
   static const String vipInfoAddMoney = 'vipInfo/addMoney'; // 会员充值
   static const String vipInfoGetVipRechargeRule = 'vipInfo/getVipRechargeRule'; // 充值赠送规则
   static const String vipInfoPay = 'vipInfo/pay'; // 会员收款（会员卡结算）
+
+  /// 收款记录 API（对齐 boss 项目 subs/member/vippay/record.vue）
+  static const String vipTableGetVipCardDetailList =
+      'vipTable/getVipCardDetailList'; // 会员储卡明细（收款记录列表）
+  static const String displayGetModelDisplaySetList =
+      'display/getModelDisplaySetList'; // 通用列设置（mcode 区分模块，091401=会员储卡明细）
 }

@@ -20,11 +20,13 @@ import 'package:flutter_deer/util/in_price_height_utils.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/not_master_product_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:flutter_deer/widgets/voice_recognition_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
@@ -93,6 +95,9 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
   Map<String, dynamic>? _billData;
   String? _newBillid;
   List<Map<String, dynamic>> _fileLists = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   // ---- 多级审批 ----
   List<Map<String, dynamic>> _reviewFlowUsers = [];
@@ -213,6 +218,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
     } else {
       _loadNewModeDefaults();
     }
+    // 新增模式：同步默认值回填完成后建立基线，未改动直接返回不弹窗
+    _refreshSnapshot();
     logEnter();
   }
 
@@ -347,11 +354,60 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
   }
 
+  // =================== 返回与未保存修改检测 ===================
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _supid,
+      _storeid,
+      _buyerid,
+      _remarkController.text,
+      jsonEncode(_fileLists),
+      _items
+          .map((r) =>
+              '${r.prodid}_${r.nameController.text}_${r.qtyController.text}_${r.priceController.text}_${r.giftQtyController.text}_${r.remarkController.text}')
+          .join(','),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/未审核（signflag 0）单据；
+  /// 已审核(1)/驳回待处理(2) 为只读态，无保存入口，直接放行
+  bool get _guardEnabled {
+    final signflag = int.tryParse(_billData?['signflag']?.toString() ?? '0') ?? 0;
+    return signflag == 0;
+  }
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      await _submit(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
   // =================== 提交保存 ===================
-  Future<void> _submit({bool isDraft = false}) async {
+  Future<void> _submit({bool isDraft = false, bool popAfterSave = false}) async {
     // 权限校验
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('011303', showTip: false)) {
@@ -525,6 +581,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
       _isTipInprice = true;
       _isTipDoubleInprice = true;
       Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      // 保存成功后重建基线，避免后续跳转/停留被误判为未保存
+      _refreshSnapshot();
       final retData = result['data'];
       if (retData is Map<String, dynamic>) {
         if (_isEdit) {
@@ -538,6 +596,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
             Navigator.pop(context, true);
           }
         }
+        // 返回时确认保存的场景：保存成功后返回上一页；普通保存仍留在当前页
+        if (popAfterSave && mounted) Navigator.pop(context, true);
       } else {
         if (!_isEdit) Navigator.pop(context, true);
       }
@@ -870,6 +930,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
       _isTipInprice = true;
       _isTipDoubleInprice = true;
       Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      // 保存成功后重建基线，避免后续跳转/停留被误判为未保存
+      _refreshSnapshot();
       final retData = result['data'];
       if (retData is Map<String, dynamic>) {
         final newBillid = retData['billid']?.toString();
@@ -1023,6 +1085,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
           'is_page': 1,
           'page': 1,
           'pagesize': 5,
+          'bzshowflag': 1,
           'stockflag': 1,
           'storeid': _storeid ?? '',
           'counterid': '',
@@ -1118,6 +1181,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
       'is_page': 1,
       'page': 1,
       'pagesize': 10,
+      'bzshowflag': 1,
       'stockflag': 1,
       'storeid': _storeid ?? '',
       'counterid': '',
@@ -1283,6 +1347,25 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
           SystemChannels.textInput.invokeMethod('TextInput.hide');
         }
       }
+    });
+  }
+
+  /// 红外扫描框是否渲染（数量失焦后焦点恢复的判据）
+  bool get _showScanBox => !_readOnly && _scanSettings.showInfraredInput;
+
+  /// 明细行数量失焦后焦点"落空"（收起键盘、点按非输入区域等）时，将焦点恢复到红外扫描框，
+  /// 支持连续扫码；焦点已落到其他输入框（用户主动点按单价/赠送/其他行等）时不干预，避免打断手工编辑
+  void _returnFocusToScanIfIdle() {
+    if (!_showScanBox) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanBox) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
     });
   }
 
@@ -1459,6 +1542,14 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
           // 重算金额（刷新价格视为编辑价格，对齐 Vue writeData：重置手动金额标记）
           row.amtManual = false;
           _recalcRow(row);
+
+          // 价格同步后回写商品最新的规格、单位 id（对齐 Vue updateTableDataInPlace）
+          if (row.rawData != null) {
+            final newSizeId = item['newsizeonlyid']?.toString();
+            final newUnitId = item['newunitonlyid']?.toString();
+            if (newSizeId != null) row.rawData!['sizeonlyid'] = newSizeId;
+            if (newUnitId != null) row.rawData!['unitonlyid'] = newUnitId;
+          }
         }
       });
     } catch (e) {
@@ -1559,6 +1650,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
   /// cgpriceflag=1 时选择页价格显示 cgprice（为空或为 0 回退档案进价 price）
   Map<String, dynamic> _buildMergData() {
     return {
+      'bzshowflag': 1,
       'stockflag': 1,
       'storeid': _storeid ?? '',
       'counterid': '',
@@ -1625,6 +1717,9 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
             row.priceController.text = MathUtils.formatDecimal(2, newPrice);
             final pn = double.tryParse(prod['packagenum']?.toString() ?? '') ?? 1;
             row.jsQtyController.text = pn > 0 ? (selectedQty / pn).toStringAsFixed(1) : '0';
+            row.batchno = prod['batchno']?.toString() ?? '';
+            row.stockqty = MathUtils.formatDecimalNum(
+                1, double.tryParse(prod['stockqty']?.toString() ?? '') ?? 0);
             row.rawData = Map<String, dynamic>.from(prod);
             // 替换语义：手动金额状态以返回行为准（旧行手动状态不保留）
             row.amtManual = false;
@@ -1649,6 +1744,9 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
             row.priceController.text = price.toStringAsFixed(2);
             final pn = double.tryParse(prod['packagenum']?.toString() ?? '') ?? 1;
             row.jsQtyController.text = pn > 0 ? (selectedQty / pn).toStringAsFixed(1) : '0';
+            row.batchno = prod['batchno']?.toString() ?? '';
+            row.stockqty = MathUtils.formatDecimalNum(
+                1, double.tryParse(prod['stockqty']?.toString() ?? '') ?? 0);
             row.rawData = Map<String, dynamic>.from(prod);
             _recalcRow(row);
             // 优先使用选择页返回的 amt（选择页可能手动修改小计金额，对齐 instore）
@@ -1723,6 +1821,9 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
         final sizeonlyid = result['sizeonlyid']?.toString();
         if (sizeonlyid != null) raw['sizeonlyid'] = sizeonlyid;
         row.rawData = raw;
+        // 切换单位后同步列表商品名称（包装单位取包装名称）
+        final newName = raw['productname']?.toString() ?? '';
+        if (newName.isNotEmpty) row.nameController.text = newName;
         // 同步件数 = 数量 / 包装数
         final pn = double.tryParse(raw['packagenum']?.toString() ?? '') ?? 1;
         row.jsQtyController.text = pn > 0 ? MathUtils.formatDecimal(1, qtyVal / pn) : '0';
@@ -1756,7 +1857,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
     final String title =
         _isEdit ? (_isSigned ? '采购订货单详情' : (_isRejected ? '采购订货单详情' : '修改采购订货')) : '新增采购订货';
 
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1766,7 +1867,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context, true),
+          onPressed: _onBackPressed,
         ),
         title: Text(title,
             style: const TextStyle(
@@ -1778,6 +1879,13 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
       body: _detailLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : _buildBody(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1828,6 +1936,8 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       child: _DetailItem(
+                        // 按行身份加 Key：避免扫码 insert(0) 列表错位后 State 复用导致失焦监听器与行错位
+                        key: ValueKey<_DetailRow>(_items[index]),
                         row: _items[index],
                         index: index,
                         isSelectMode: _isSelectMode,
@@ -1836,6 +1946,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
                         onToggle: () => _toggleIndex(index),
                         onTap: () => _editDetail(index),
                         onChanged: () => setState(() {}),
+                        onQtyBlur: _returnFocusToScanIfIdle,
                       ),
                     ),
                   ),
@@ -2383,8 +2494,13 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
         required: true,
         value: _storeController.text,
         onTap: () async {
-          final result =
-              await SelectStorePage.show(context, initialSelectedId: _storeid?.toString() ?? '');
+          // 对齐 Vue cgorder/edit.vue：登录门店 supflag==1 时才传 supflag（...(store.supflag == 1 ? { supflag: 1 } : {})）
+          final supflag = SelectStorePage.loginStoreField('supflag') == '1' ? '1' : null;
+          final result = await SelectStorePage.show(
+            context,
+            initialSelectedId: _storeid?.toString() ?? '',
+            supflag: supflag,
+          );
           if (result != null && mounted) {
             final oldStoreid = _storeid;
             setState(() {
@@ -2815,6 +2931,7 @@ class _PurchaseCgorderAddPageState extends State<PurchaseCgorderAddPage>
 // =================== 明细行独立 Widget ===================
 class _DetailItem extends StatefulWidget {
   const _DetailItem({
+    super.key,
     required this.row,
     required this.index,
     this.isSelectMode = false,
@@ -2823,6 +2940,7 @@ class _DetailItem extends StatefulWidget {
     required this.onToggle,
     required this.onTap,
     this.onChanged,
+    this.onQtyBlur,
   });
   final _DetailRow row;
   final int index;
@@ -2834,6 +2952,9 @@ class _DetailItem extends StatefulWidget {
 
   /// 失焦回调：行金额格式化/重算完成后通知父页面刷新底部合计
   final VoidCallback? onChanged;
+
+  /// 数量失焦回调：父页面在焦点落空时将焦点恢复到扫描框
+  final VoidCallback? onQtyBlur;
 
   @override
   State<_DetailItem> createState() => _DetailItemState();
@@ -2854,7 +2975,11 @@ class _DetailItemState extends State<_DetailItem> {
   void initState() {
     super.initState();
     _onPriceBlur = () => _formatField(widget.row.priceFocusNode, _priceCtrl, 2);
-    _onQtyBlur = () => _formatField(widget.row.qtyFocusNode, _qtyCtrl, 1);
+    _onQtyBlur = () {
+      _formatField(widget.row.qtyFocusNode, _qtyCtrl, 1);
+      // 数量失焦后通知父页面评估恢复扫描框焦点（连续扫码）
+      if (!widget.row.qtyFocusNode.hasFocus) widget.onQtyBlur?.call();
+    };
     _onGiftBlur = () => _formatField(widget.row.giftQtyFocusNode, _giftQtyCtrl, 1);
     widget.row.priceFocusNode.addListener(_onPriceBlur);
     widget.row.qtyFocusNode.addListener(_onQtyBlur);
@@ -3200,11 +3325,10 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     return productid.isNotEmpty && _sizeonlyid.isEmpty;
   }
 
-  /// 规格可选条件（对齐 Vue edit.vue size 列：specflag == 1 && unitonlyid 为空）
+  /// 规格可选条件：采购单据暂不启用规格选择器，仅展示规格文本（与 PC 端 edit.vue 屏蔽 #size 插槽一致）；
+  /// 原条件为 specflag == '1' && _unitonlyid.isEmpty（对齐 Vue edit.vue size 列），恢复规格选择时按此还原
   bool get _sizeCanSelect {
-    final data = widget.productData;
-    final specflag = data['specflag']?.toString() ?? '';
-    return specflag == '1' && _unitonlyid.isEmpty;
+    return false;
   }
 
   double get _packagenum =>
@@ -3851,6 +3975,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
         _unitonlyid = result['unitonlyid']?.toString() ?? result['_id']?.toString() ?? '';
         data['unit'] = _currentUnit;
         data['unitonlyid'] = _unitonlyid;
+        // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+        syncUnitProductName(data, result, unitonlyid: _unitonlyid);
         // packagenum：选了非默认单位后设为 1
         // （对齐 Vue unitConfirm：if (unitonlyid != "") packagenum = 1）
         if (_unitonlyid.isNotEmpty) data['packagenum'] = 1;

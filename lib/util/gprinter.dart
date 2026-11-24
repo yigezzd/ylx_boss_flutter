@@ -67,8 +67,14 @@ class GPrinter {
   }
 
   /// 连接指定 MAC 的蓝牙打印机
-  static Future<bool> connect(String mac) async {
-    final res = await _channel.invokeMethod<bool>('connect', {'mac': mac});
+  ///
+  /// [name] 扫描到的设备名称（品牌识别依据：佳博走 TSPL、汉印走 CPCL；
+  /// 名称未识别时会连接后自动探测，探测失败回退 TSPL 保持佳博行为不变）
+  static Future<bool> connect(String mac, {String name = ''}) async {
+    final res = await _channel.invokeMethod<bool>(
+      'connect',
+      {'mac': mac, 'name': name},
+    );
     return res ?? false;
   }
 

@@ -3,6 +3,7 @@ import 'package:flutter_deer/pages/business/basis/printing/edit_product_group.da
 import 'package:flutter_deer/pages/business/basis/printing/label_print_home.dart';
 import 'package:flutter_deer/pages/business/basis/printing/receipt_detail.dart';
 import 'package:flutter_deer/pages/business/basis/printing/receipts_list.dart';
+import 'package:flutter_deer/pages/business/basis/printing/unprinted_list.dart';
 import 'package:flutter_deer/routers/i_router.dart';
 
 class PrintingRouter implements IRouterProvider {
@@ -10,6 +11,7 @@ class PrintingRouter implements IRouterProvider {
   static const String receiptsList = '/basis/printing/receiptsList';
   static const String receiptDetail = '/basis/printing/receiptDetail';
   static const String editProductGroup = '/basis/printing/editProductGroup';
+  static const String unprintedList = '/basis/printing/unprintedList';
 
   @override
   void initRouter(FluroRouter router) {
@@ -35,6 +37,12 @@ class PrintingRouter implements IRouterProvider {
       editProductGroup,
       handler: Handler(
         handlerFunc: (_, __) => const EditProductGroupPage(),
+      ),
+    );
+    router.define(
+      unprintedList,
+      handler: Handler(
+        handlerFunc: (_, __) => const UnprintedListPage(),
       ),
     );
   }

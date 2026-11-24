@@ -7,6 +7,7 @@ import 'package:flutter_deer/net/dio_utils.dart';
 import 'package:flutter_deer/net/intercept.dart';
 import 'package:flutter_deer/pages/home/home_page.dart';
 import 'package:flutter_deer/pages/login/page/login_page.dart';
+import 'package:flutter_deer/push/push_service.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/routers/not_found_page.dart';
 import 'package:flutter_deer/routers/routers.dart';
@@ -50,9 +51,19 @@ Future<void> main() async {
     /// 操作审计：App 启动（后续登录/进入首页的轨迹均从此刻开始）
     FileLogWriter.instance.writeOperationLog('App', '启动');
 
+    /// 初始化日志工具（提前于此，保证推送初始化阶段的日志能输出到控制台）
+    Log.init();
+
+    /// 初始化推送服务（极光 JPush）：注册事件回调、初始化 SDK
+    PushService.instance.init();
+
     /// 1.22 预览功能: 在输入频率与显示刷新率不匹配情况下提供平滑的滚动效果
     // GestureBinding.instance?.resamplingEnabled = true;
     runApp(MyApp());
+
+    /// 登录状态下拉取系统参数列表、重存登录相关数据
+    /// （对齐 boss 项目 App.vue onLaunch 行为）已迁移至首页启动后执行，
+    /// 见 HomePage.initState → LoginParamsUtils.refreshLoginParams()
   });
 
   /// 显示状态栏和导航栏（启动页如需全屏可单独处理）

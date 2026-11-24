@@ -15,7 +15,7 @@ import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 ///
 /// 流程：选择会员 → 输入充值金额（自动匹配赠送规则 getVipRechargeRule）
 /// → 选择支付方式/业务员 → 立即充值（vipInfo/addMoney，权限 010801）。
-/// 微信/支付宝（payid 03/04）需先扫描 18 位付款码。
+/// 微信/支付宝/云闪付（payid 03/04/13）需先扫描 18 位付款码。
 class MemberRechargeEditPage extends StatefulWidget {
   const MemberRechargeEditPage({super.key, required this.vipInfo});
 
@@ -203,18 +203,22 @@ class _MemberRechargeEditPageState extends State<MemberRechargeEditPage> {
       return;
     }
 
-    // 微信/支付宝需扫 18 位付款码（对齐 Vue scanQrClose）
-    if ((_payid == '03' || _payid == '04') && _authCode.isEmpty) {
+    // 微信/支付宝/云闪付需扫 18 位付款码（对齐 Vue scanQrClose）
+    if ((_payid == '03' || _payid == '04' || _payid == '13') && _authCode.isEmpty) {
       final code = await Navigator.push<String>(
         context,
         MaterialPageRoute<String>(builder: (_) => const QrCodeScannerPage()),
       );
       if (!mounted) return;
-      if (code == null || code.length != 18) {
+      // 付款码位数按支付方式区分：微信/支付宝 18 位，云闪付 19 位（兼容 18 位）
+      final payCode = (code ?? '').trim();
+      final validCode = RegExp(r'^\d+$').hasMatch(payCode) &&
+          (_payid == '13' ? payCode.length == 18 || payCode.length == 19 : payCode.length == 18);
+      if (!validCode) {
         Toast.show('请扫描正确的付款码');
         return;
       }
-      _authCode = code;
+      _authCode = payCode;
     }
 
     await _payFn(amt);

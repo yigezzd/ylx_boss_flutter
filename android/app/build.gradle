@@ -1,6 +1,8 @@
 plugins {
     id "com.android.application"
     id "dev.flutter.flutter-gradle-plugin"
+    // 读取本目录的 agconnect-services.json，生成华为应用配置资源
+    id "com.huawei.agconnect"
 }
 
 def localProperties = new Properties()
@@ -31,11 +33,25 @@ android {
     compileSdkVersion 36
     ndkVersion = "28.2.13676358"
     defaultConfig {
-        applicationId "com.weilu.deer"
+        applicationId "com.boyou.lxboss"
         minSdkVersion flutter.minSdkVersion
         targetSdkVersion 35
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+
+        // 极光推送：AppKey 需与 lib/push/push_config.dart 中的 appKey 保持一致
+        manifestPlaceholders = [
+            JPUSH_PKGNAME : applicationId,
+            JPUSH_APPKEY  : "0052165d4ce3194b134d2e58",
+            JPUSH_CHANNEL : "default_developer",
+
+            // OPPO 厂商通道
+            // 注意：只要依赖了 cn.jiguang.sdk.plugin:oppo，这三个占位符就必须赋值，
+            // 否则 :app:processDebugMainManifest 会因 manifest 合并缺少占位符而失败
+            OPPO_APPKEY   : "OP-69ea4ed0629346cbb27475ce7df3e3cb",
+            OPPO_APPID    : "OP-37744354",
+            OPPO_APPSECRET: "OP-09b71178fc304bc2b680617ce5d9696f",
+        ]
     }
 
     signingConfigs {
@@ -93,4 +109,11 @@ dependencies {
     implementation(name: 'serial-port', ext: 'aar')
     implementation(name: 'jzint', ext: 'aar')
     implementation(name: 'fimage', ext: 'aar')
+
+    // 极光 OPPO 厂商通道（应用被杀进程后仍可接收推送）
+    implementation 'cn.jiguang.sdk.plugin:oppo:6.2.1'
+1
+    // 极光华为厂商通道：与 JPush 6.2.1 保持一致，由适配库自动引入 HMS Push
+    implementation 'cn.jiguang.sdk.plugin:huawei:6.2.1'
 }
+

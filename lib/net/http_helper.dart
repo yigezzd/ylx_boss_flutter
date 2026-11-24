@@ -6,6 +6,7 @@ import 'package:flutter_deer/main.dart';
 import 'package:flutter_deer/net/dio_utils.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/pages/login/page/login_page.dart';
+import 'package:flutter_deer/push/push_service.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
@@ -58,30 +59,39 @@ Future<Map<String, dynamic>> request(
   bool showLoading = false,
   bool showError = true,
   dynamic rawParamsValue,
+  Map<String, String>? commonParams,
+
+  /// 接口级错误提示白名单：retmsg 包含列表中任一子串时不弹错误提示并正常返回完整响应，
+  /// 供调用方自行识别处理（对齐 PC 端 ignoreRetmsgList / 小程序端同名字段）
+  List<String>? ignoreRetmsgList,
 ]) async {
-  final String token = SpUtil.getString(Constant.token) ?? '';
+  // 优先使用调用方传入的公共参数（如退出登录解绑时缓存已被清空）
+  final String token = commonParams?['token'] ?? (SpUtil.getString(Constant.token) ?? '');
 
   // 从 store 中读取 sid / spid
-  String sid = '';
-  String spid = '';
-  try {
-    final String storeStr = SpUtil.getString(Constant.store) ?? '';
-    if (storeStr.isNotEmpty) {
-      final Map<String, dynamic> storeMap = jsonDecode(storeStr) as Map<String, dynamic>;
-      sid = storeMap['id']?.toString() ?? '';
-      spid = storeMap['spid']?.toString() ?? '';
-    }
-  } catch (_) {}
+  String sid = commonParams?['sid'] ?? '';
+  String spid = commonParams?['spid'] ?? '';
+  String? userid = commonParams?['userid'];
 
-  // 从 user 中读取 userid
-  String? userid;
-  try {
-    final String userStr = SpUtil.getString(Constant.user) ?? '';
-    if (userStr.isNotEmpty) {
-      final Map<String, dynamic> userMap = jsonDecode(userStr) as Map<String, dynamic>;
-      userid = userMap['userid']?.toString();
-    }
-  } catch (_) {}
+  // 未显式传入公共参数时，从本地缓存读取
+  if (commonParams == null) {
+    try {
+      final String storeStr = SpUtil.getString(Constant.store) ?? '';
+      if (storeStr.isNotEmpty) {
+        final Map<String, dynamic> storeMap = jsonDecode(storeStr) as Map<String, dynamic>;
+        sid = storeMap['id']?.toString() ?? '';
+        spid = storeMap['spid']?.toString() ?? '';
+      }
+    } catch (_) {}
+
+    try {
+      final String userStr = SpUtil.getString(Constant.user) ?? '';
+      if (userStr.isNotEmpty) {
+        final Map<String, dynamic> userMap = jsonDecode(userStr) as Map<String, dynamic>;
+        userid = userMap['userid']?.toString();
+      }
+    } catch (_) {}
+  }
 
   // 构建 params：
   // - rawParamsValue 优先（兼容旧调用）
@@ -126,7 +136,10 @@ Future<Map<String, dynamic>> request(
   };
 
   const String baseUrl = HttpApi.baseUrlYlx;
-  final String fullUrl = url.startsWith('http') ? url : '$baseUrl$url';
+  // 注意：需用 http:// / https:// 判断完整地址——'httpUtil/getGet' 以 "http" 开头但不是完整地址，
+  // 若用 startsWith('http') 会误判为完整地址而跳过 baseUrl 前缀，请求会落到 dio 默认 baseUrl
+  final String fullUrl =
+      url.startsWith('http://') || url.startsWith('https://') ? url : '$baseUrl$url';
 
   try {
     final Response<String> response = await DioUtils.instance.dio.post<String>(
@@ -148,6 +161,13 @@ Future<Map<String, dynamic>> request(
         _logApi(fullUrl, params, '接口失败 retcode=$retcode retmsg=$retmsg');
         _handleLoginExpired(retmsg);
         throw _ApiException(jsonMap);
+      }
+      // 白名单放行：retmsg 命中 ignoreRetmsgList 时不弹错误提示，返回完整响应交由调用方识别处理
+      if (retcode == -1 &&
+          ignoreRetmsgList != null &&
+          ignoreRetmsgList.any((String item) => retmsg.contains(item))) {
+        _logApi(fullUrl, params, '接口失败（白名单放行） retcode=$retcode retmsg=$retmsg');
+        return jsonMap;
       }
       if (showError && retmsg.isNotEmpty) {
         Toast.show(retmsg);
@@ -281,6 +301,9 @@ void _clearCachePreservingRemember() {
 
   // 布尔类型的记住密码开关（单独处理，避免类型不匹配）
   final bool? rememberPwdEnabled = SpUtil.getBool(Constant.rememberPwdEnabled);
+
+  // 退出登录 / 登录失效：解绑推送别名与标签（需在清除缓存前调用，保证能读到 userid）
+  PushService.instance.unbindUser();
 
   SpUtil.clear();
 

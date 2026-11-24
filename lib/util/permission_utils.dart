@@ -32,6 +32,15 @@ class PermissionUtils {
   /// 不重入标记（避免并发重复请求）
   static Future<Map<String, dynamic>?>? _pending;
 
+  // ──────────── 权限变更通知 ──────────────────────────────────
+
+  /// 权限数据版本号：每次 rolemap 刷新成功后自增。
+  ///
+  /// 业务 / 报表等页面通过 [ValueListenableBuilder] 监听该值，
+  /// 权限变化后自动重建，使“无权限不可见”的入口即时生效
+  /// （对齐 boss 项目 navPath 前置校验后的可见性表现）。
+  static final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
   // ──────────── 权限校验 ────────────────────────────────────────────
 
   /// 检查当前用户是否拥有 [menuId] 对应的权限。
@@ -44,7 +53,7 @@ class PermissionUtils {
     // 读取 rolemap 缓存
     Map<String, dynamic>? rolemap;
     try {
-      final rolemapStr = SpUtil.getString(Constant.rolemap, defValue: '') ?? '';
+      final rolemapStr = SpUtil.getString(Constant.rolemap) ?? '';
       if (rolemapStr.isNotEmpty) {
         rolemap = jsonDecode(rolemapStr) as Map<String, dynamic>;
       }
@@ -53,7 +62,7 @@ class PermissionUtils {
     // 读取 user 缓存
     Map<String, dynamic>? user;
     try {
-      final userStr = SpUtil.getString(Constant.user, defValue: '') ?? '';
+      final userStr = SpUtil.getString(Constant.user) ?? '';
       if (userStr.isNotEmpty) {
         user = jsonDecode(userStr) as Map<String, dynamic>;
       }
@@ -67,12 +76,7 @@ class PermissionUtils {
     // 只要不是显式的 falsy 值（false / 'false' / 0 / '0' / null / ''）即视为有权限
     if (rolemap != null && rolemap.containsKey(menuId)) {
       final val = rolemap[menuId];
-      if (val != null &&
-          val != false &&
-          val != 'false' &&
-          val != 0 &&
-          val != '0' &&
-          val != '') {
+      if (val != null && val != false && val != 'false' && val != 0 && val != '0' && val != '') {
         return true;
       }
     }
@@ -106,7 +110,7 @@ class PermissionUtils {
   /// 对齐 boss 项目 store/user.ts fetchRoleInfoRetMap 实现。
   static Future<Map<String, dynamic>?> fetchRoleInfoRetMap({bool force = false}) async {
     // 未登录时不请求
-    final token = SpUtil.getString(Constant.token, defValue: '') ?? '';
+    final token = SpUtil.getString(Constant.token) ?? '';
     if (token.isEmpty) return null;
 
     // 节流：10s 内不重复请求
@@ -129,7 +133,7 @@ class PermissionUtils {
         'clientflag': 9,
       };
       try {
-        final userStr = SpUtil.getString(Constant.user, defValue: '') ?? '';
+        final userStr = SpUtil.getString(Constant.user) ?? '';
         if (userStr.isNotEmpty) {
           final user = jsonDecode(userStr) as Map<String, dynamic>;
           final roleid = user['roleid']?.toString();
@@ -161,6 +165,8 @@ class PermissionUtils {
       // 写入本地缓存
       SpUtil.putString(Constant.rolemap, json.encode(rolemap));
       _lastFetchAt = DateTime.now().millisecondsSinceEpoch;
+      // 通知监听方（业务 / 报表 Tab）权限已更新，触发可见性重建
+      revision.value++;
 
       debugPrint('[PermissionUtils] fetchRoleInfoRetMap 成功，权限项数: ${rolemap.length}');
       return rolemap;
@@ -174,7 +180,7 @@ class PermissionUtils {
 
   static Map<String, dynamic>? _getCachedRolemap() {
     try {
-      final rolemapStr = SpUtil.getString(Constant.rolemap, defValue: '') ?? '';
+      final rolemapStr = SpUtil.getString(Constant.rolemap) ?? '';
       if (rolemapStr.isNotEmpty) {
         return jsonDecode(rolemapStr) as Map<String, dynamic>;
       }

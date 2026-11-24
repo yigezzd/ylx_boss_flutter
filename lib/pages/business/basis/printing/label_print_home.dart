@@ -16,6 +16,7 @@ import 'package:flutter_deer/util/gprinter.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
+import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/my_app_bar.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:sp_util/sp_util.dart';
@@ -38,6 +39,9 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
+  /// 搜索框焦点（PDA 扫码枪连续扫码：每次扫码/搜索/弹层关闭后把光标交回搜索框）
+  final FocusNode _searchFocusNode = FocusNode();
+
   /// 商品列表
   List<Map<String, dynamic>> _dataList = [];
 
@@ -53,6 +57,12 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
   @override
   void initState() {
     super.initState();
+    // 进入页面即聚焦搜索框（PDA 扫码枪可直接扫码录入）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _focusSearchNow();
+      }
+    });
     // 查看权限校验
     if (PermissionUtils.checkPermission('010601', showTip: false)) {
       _loadPrintSettings();
@@ -65,6 +75,7 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
   void dispose() {
     _searchController.dispose();
     _scrollController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
@@ -162,7 +173,11 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
         // 输入框多条命中：打开商品选择页（对齐 Vue searchFn）
         _openSelectProduct(cond);
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      // 扫码枪连续扫码：搜索结束后把光标交回搜索框（弹层/选择页开着时由各自的关闭回调再聚焦）
+      _refocusSearch();
+    }
   }
 
   /// 单商品结果处理（对齐 Vue scanFn）：
@@ -194,17 +209,26 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
   }
 
   /// 商品追加/累加（对齐 Vue addOrAccumulateItem）：
-  /// 列表中已存在（productid 匹配，barcode 兜底）则累加数量上限 20，否则新增
+  /// - 多规格/多单位商品：条码不同视为不同规格，不累加，直接新增到列表（对齐小程序）
+  /// - 普通商品：productid 匹配（barcode 兜底），已存在则累加数量上限 20，否则新增
   void _addOrAccumulateItem(Map<String, dynamic> item) {
     item['qty'] = _clampQty(item['qty']);
     final newQty = item['qty'] as int;
     final productid = item['productid']?.toString() ?? '';
     final barcode = item['barcode']?.toString() ?? '';
+    // 多规格/多单位标识：specflag=1 或 packageflag=1
+    final isMultiSpec =
+        item['specflag']?.toString() == '1' || item['packageflag']?.toString() == '1';
 
     final existIdx = _dataList.indexWhere((d) {
-      final dProductid = d['productid']?.toString() ?? '';
       final dBarcode = d['barcode']?.toString() ?? '';
-      // 优先以 productid 匹配，部分场景可能缺失则用 barcode 兜底
+      final dIsMultiSpec = d['specflag']?.toString() == '1' || d['packageflag']?.toString() == '1';
+      // 多规格商品：仅按 barcode 匹配，条码不同则作为独立商品新增，避免误累加
+      if (isMultiSpec || dIsMultiSpec) {
+        return barcode.isNotEmpty && dBarcode.isNotEmpty && dBarcode == barcode;
+      }
+      // 普通商品：优先以 productid 匹配，部分场景可能缺失则用 barcode 兜底
+      final dProductid = d['productid']?.toString() ?? '';
       return (productid.isNotEmpty && dProductid == productid) ||
           (barcode.isNotEmpty && dBarcode.isNotEmpty && dBarcode == barcode);
     });
@@ -228,10 +252,16 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
       context,
       MaterialPageRoute(builder: (_) => const QrCodeScannerPage()),
     );
-    if (result == null || !mounted) return;
+    if (result == null || !mounted) {
+      // 取消扫码返回后会丢失焦点，恢复给搜索框便于继续扫码
+      _refocusSearch();
+      return;
+    }
     final code = result.toString();
     if (code.isNotEmpty) {
       _searchProduct(code);
+    } else {
+      _refocusSearch();
     }
   }
 
@@ -269,6 +299,8 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
         }).toList();
       });
     }
+    // 选择页返回后把光标交回搜索框，支持扫码枪连续扫码
+    _refocusSearch();
   }
 
   // ─── 商品详情弹窗（多单位/多规格商品，对齐 Vue proDetails）───
@@ -303,6 +335,22 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
       // 确认后追加/累加（对齐 Vue detailConfirm + addOrAccumulateItem）
       _addOrAccumulateItem(updated);
     }
+    // 详情弹窗关闭后把光标交回搜索框，支持扫码枪连续扫码
+    _refocusSearch();
+  }
+
+  /// 打开未打印标签页（对齐小程序 printing/index.vue 未打印入口）
+  void _openUnprintedList() {
+    if (!PermissionUtils.checkPermission('010602', showTip: false)) {
+      Toast.show('你无权查看未打印标签，请在后台修改权限');
+      return;
+    }
+    NavigatorUtils.pushResult(context, PrintingRouter.unprintedList, (_) {
+      // 返回后刷新打印设置（用户可能在未打印页内跳转过打印设置页）
+      if (mounted) _loadPrintSettings();
+      // 页返回后把光标交回搜索框
+      _refocusSearch();
+    });
   }
 
   /// 打开单据列表页，选择商品后加入打印列表
@@ -321,6 +369,8 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
             }
           });
         }
+        // 单据页返回后把光标交回搜索框
+        _refocusSearch();
       },
     );
   }
@@ -418,7 +468,8 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
     if (!connected && mac.isNotEmpty && mounted) {
       _showBleLoading('正在连接打印机...');
       try {
-        connected = await GPrinter.connect(mac);
+        connected = await GPrinter.connect(mac,
+            name: _printSettings['lableBluetoothCode']?.toString() ?? '');
       } catch (_) {
         connected = false;
       }
@@ -468,6 +519,8 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
     } finally {
       _blePrinting = false;
       _hideBleLoading();
+      // 打印结束后把光标交回搜索框，方便继续扫码
+      _refocusSearch();
     }
   }
 
@@ -521,7 +574,10 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
         content: Text(content, style: const TextStyle(fontSize: 14)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _refocusSearch();
+            },
             child: const Text('取消'),
           ),
           TextButton(
@@ -535,6 +591,8 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
               if (mounted) {
                 _loadPrintSettings();
               }
+              // 设置页返回后把光标交回搜索框
+              _refocusSearch();
             },
             child: const Text('去设置', style: TextStyle(color: _primaryColor)),
           ),
@@ -551,13 +609,17 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
         content: Text(content, style: const TextStyle(fontSize: 14)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _refocusSearch();
+            },
             child: const Text('取消'),
           ),
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
               onConfirm();
+              _refocusSearch();
             },
             child: const Text('确定', style: TextStyle(color: _primaryColor)),
           ),
@@ -604,7 +666,10 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _refocusSearch();
+            },
             child: const Text('取消'),
           ),
           TextButton(
@@ -624,6 +689,7 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
                 }
               });
               Navigator.pop(ctx);
+              _refocusSearch();
             },
             child: const Text('确定', style: TextStyle(color: _primaryColor)),
           ),
@@ -633,6 +699,35 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
   }
 
   // ─── 工具方法 ───
+
+  /// 把光标重新交回搜索框（PDA 扫码枪连续扫码依赖焦点停留在输入框）
+  ///
+  /// 弹层 route 还开着或刚 pop 尚在退场时 `isCurrent` 仍为 false，
+  /// 此时不抢焦点，延时 300ms 再补一次（覆盖弹层退场动画），避免与弹层争焦点。
+  void _refocusSearch() {
+    if (!mounted) {
+      return;
+    }
+    final bool isCurrent = ModalRoute.of(context)?.isCurrent ?? false;
+    if (isCurrent) {
+      _focusSearchNow();
+      return;
+    }
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (!mounted) {
+        return;
+      }
+      final bool current = ModalRoute.of(context)?.isCurrent ?? false;
+      if (current) {
+        _focusSearchNow();
+      }
+    });
+  }
+
+  /// 立即聚焦搜索框（扫码枪连续扫码依赖焦点停留在输入框）
+  void _focusSearchNow() {
+    _searchFocusNode.requestFocus();
+  }
 
   int _clampQty(dynamic val) {
     final qty = int.tryParse(val?.toString() ?? '') ?? 1;
@@ -782,6 +877,7 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
                 builder: (context, value, _) {
                   return TextField(
                     controller: _searchController,
+                    focusNode: _searchFocusNode,
                     onSubmitted: (_) => _searchProduct(),
                     decoration: InputDecoration(
                       hintText: '请输入条码/品名/自编码',
@@ -837,6 +933,12 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
             ),
           ),
           const SizedBox(width: 8),
+          // 未打印标签按钮（图标与小程序 icon-weidayin 保持一致）
+          _buildIconButton(
+            svgFile: 'weidayin.svg',
+            onTap: _openUnprintedList,
+          ),
+          const SizedBox(width: 8),
           // 自定义商品按钮
           _buildIconButton(
             icon: Icons.tune,
@@ -854,7 +956,8 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
   }
 
   Widget _buildIconButton({
-    required IconData icon,
+    IconData? icon,
+    String? svgFile,
     required VoidCallback onTap,
   }) {
     return GestureDetector(
@@ -866,7 +969,9 @@ class _LabelPrintHomePageState extends State<LabelPrintHomePage> {
           border: Border.all(color: _borderColor),
           borderRadius: BorderRadius.circular(3),
         ),
-        child: Icon(icon, size: 22, color: _textColor),
+        child: svgFile != null
+            ? Center(child: BossSvgIcon(svgFile: svgFile, size: 22))
+            : Icon(icon, size: 22, color: _textColor),
       ),
     );
   }

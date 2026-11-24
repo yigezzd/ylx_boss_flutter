@@ -8,6 +8,7 @@ import 'package:flutter_deer/pages/home/report_page.dart';
 import 'package:flutter_deer/pages/login/page/login_page.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/util/device_utils.dart';
+import 'package:flutter_deer/util/login_params_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/version_check_utils.dart';
 import 'package:flutter_deer/widgets/double_tap_back_exit_app.dart';
@@ -27,10 +28,17 @@ class _HomePageState extends State<HomePage> {
 
   late final List<Widget> _pages = [
     const MainHomePage(),
-    const BusinessPage(),
-    const ReportPage(),
+    // onSwitchToMyTab：业务页席位续费弹窗"解绑席位"时跳转"我的"tab
+    // （对齐 Vue onSeatUnbind → uni.switchTab 我的页）
+    BusinessPage(onSwitchToMyTab: () => _onTabTapped(_myTabIndex)),
+    // onSwitchToMyTab：报表页席位续费弹窗"解绑席位"时跳转"我的"tab
+    // （对齐 Vue onSeatUnbind → uni.switchTab 我的页）
+    ReportPage(onSwitchToMyTab: () => _onTabTapped(_myTabIndex)),
     const MyPage(),
   ];
+
+  /// "我的"tab 在 [_visibleTabs] 中的索引
+  static const int _myTabIndex = 3;
 
   /// 当前可见的底部导航项
   static const List<_TabItem> _visibleTabs = [
@@ -63,6 +71,8 @@ class _HomePageState extends State<HomePage> {
         VersionCheckUtils.checkUpdate(context: context, silent: true);
         // 启动时预取权限数据（登录响应已携带初始 rolemap，此处确保缓存最新）
         PermissionUtils.fetchRoleInfoRetMap();
+        // 启动时拉取系统参数列表，重存登录相关数据（对齐 boss 项目 App.vue onLaunch）
+        LoginParamsUtils.refreshLoginParams();
       }
     });
   }

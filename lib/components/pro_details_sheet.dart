@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 
 /// 商品信息展示样式
@@ -368,6 +369,8 @@ class _ProDetailsSheetState extends State<ProDetailsSheet> {
       final uid = result['unitonlyid']?.toString() ?? result['_id']?.toString() ?? '';
       _unitonlyid = uid;
       _item['unitonlyid'] = uid;
+      // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+      syncUnitProductName(_item, result, unitonlyid: uid);
       _item['defunit'] = u;
       _item['defunitid'] = uid;
       // 对齐 Vue：选了包装单位后 packagenum 置 1

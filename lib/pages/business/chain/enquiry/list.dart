@@ -11,9 +11,11 @@ import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/review_config_utils.dart';
+import 'package:flutter_deer/util/review_nav_state.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:sp_util/sp_util.dart';
 
 /// 要货申请单列表页（对齐 Vue chain/enquiry/enquiry.vue）
@@ -68,7 +70,8 @@ class _EnquiryListPageState extends State<EnquiryListPage>
   void initState() {
     super.initState();
 
-    _tabController = TabController(length: 3, vsync: this);
+    _statusIndex = ReviewNavState.consumePendingStatusIndex();
+    _tabController = TabController(length: 3, vsync: this, initialIndex: _statusIndex);
     _tabController!.addListener(_onTabChanged);
 
     final now = DateTime.now();
@@ -1031,11 +1034,18 @@ class _EnquiryCard extends StatelessWidget {
     }
   }
 
-  /// 单据终止/过期标签（对齐 Vue enquiry.vue：djstatus 为中文状态值）
+  /// 已过期标识样式开关：false = 单号旁红色边框标签（对齐后台左侧样式，当前使用）；
+  /// true = 卡片中央 yiguoqi.svg 印章（旧样式，代码保留便于恢复）
+  static const bool showExpiredStamp = false;
+
+  /// 单据终止 / 过期角标：印章开关关闭时，"已过期"与"已终止"一样以单号旁标签呈现
   static String? _djstatusLabel(String? djstatus) {
-    if (djstatus == '已终止' || djstatus == '已过期') return djstatus;
+    if (djstatus == '已终止') return djstatus;
+    if (djstatus == '已过期' && !showExpiredStamp) return djstatus;
     return null;
   }
+
+  static bool _isExpired(String? djstatus) => djstatus == '已过期';
 
   @override
   Widget build(BuildContext context) {
@@ -1051,6 +1061,7 @@ class _EnquiryCard extends StatelessWidget {
     final bool isUrgent = item['urgentflag']?.toString() == '1';
     final String? phstatusLabel = _phstatusLabel(item['phstatus']);
     final String? djstatusLabel = _djstatusLabel(item['djstatus']?.toString());
+    final bool isExpired = _isExpired(item['djstatus']?.toString());
 
     return GestureDetector(
       onTap: onTap,
@@ -1061,117 +1072,130 @@ class _EnquiryCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 第1行：单号 + 加急标签 + 审核状态
-              Row(
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Row(
-                      children: [
-                        Flexible(
-                          child: Text(billno,
-                              style: const TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFF111827))),
+                  // 第1行：单号 + 加急标签 + 审核状态
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: Text(billno,
+                                  style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF111827))),
+                            ),
+                            if (isUrgent) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFF0000),
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
+                                child: const Text('加急',
+                                    style: TextStyle(fontSize: 10, color: Colors.white)),
+                              ),
+                            ],
+                            // 单据终止 / 已过期角标（仅 showExpiredStamp=false 时显示已过期标签）
+                            if (djstatusLabel != null) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: const Color(0xFFE02020)),
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
+                                child: Text(djstatusLabel,
+                                    style: const TextStyle(fontSize: 10, color: Color(0xFFE02020))),
+                              ),
+                            ],
+                          ],
                         ),
-                        if (isUrgent) ...[
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFF0000),
-                              borderRadius: BorderRadius.circular(3),
-                            ),
-                            child: const Text('加急',
-                                style: TextStyle(fontSize: 10, color: Colors.white)),
-                          ),
-                        ],
-                        // 已终止/已过期标签（对齐 Vue enquiry.vue 52-53 行角标）
-                        if (djstatusLabel != null) ...[
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                            decoration: BoxDecoration(
-                              border: Border.all(color: const Color(0xFFE02020)),
-                              borderRadius: BorderRadius.circular(3),
-                            ),
-                            child: Text(djstatusLabel,
-                                style: const TextStyle(fontSize: 10, color: Color(0xFFE02020))),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  Text(statusLabel,
-                      style:
-                          TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: statusColor)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // 第2行：要货门店 + 配送中心
-              Row(
-                children: [
-                  Expanded(
-                    child: Text('要货门店：$instorename',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                  Expanded(
-                    child: Text('配送中心：$outstorename',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                        textAlign: TextAlign.right,
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              // 第3行：单据金额 + 制单人
-              Row(
-                children: [
-                  Expanded(
-                    child: Text('单据金额：$billamt',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                  Expanded(
-                    child: Text('制单人：$createname',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                        textAlign: TextAlign.right,
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                ],
-              ),
-              Container(
-                height: 1,
-                color: const Color(0xFFEBEBEB),
-                margin: const EdgeInsets.symmetric(vertical: 8),
-              ),
-              // 第4行：制单时间 + 配货状态标签
-              Row(
-                children: [
-                  Expanded(
-                    child: Text('制单时间：$createtime',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A))),
-                  ),
-                  if (phstatusLabel != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: const Color(0xFF006EFF)),
-                        borderRadius: BorderRadius.circular(3),
                       ),
-                      child: Text(phstatusLabel,
-                          style: const TextStyle(fontSize: 10, color: Color(0xFF006EFF))),
-                    ),
+                      Text(statusLabel,
+                          style: TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w500, color: statusColor)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  // 第2行：要货门店 + 配送中心
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text('要货门店：$instorename',
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                      Expanded(
+                        child: Text('配送中心：$outstorename',
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                            textAlign: TextAlign.right,
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  // 第3行：单据金额 + 制单人
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text('单据金额：$billamt',
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                      Expanded(
+                        child: Text('制单人：$createname',
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                            textAlign: TextAlign.right,
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                    ],
+                  ),
+                  Container(
+                    height: 1,
+                    color: const Color(0xFFEBEBEB),
+                    margin: const EdgeInsets.symmetric(vertical: 8),
+                  ),
+                  // 第4行：制单时间 + 配货状态标签
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text('制单时间：$createtime',
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A))),
+                      ),
+                      if (phstatusLabel != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: const Color(0xFF006EFF)),
+                            borderRadius: BorderRadius.circular(3),
+                          ),
+                          child: Text(phstatusLabel,
+                              style: const TextStyle(fontSize: 10, color: Color(0xFF006EFF))),
+                        ),
+                    ],
+                  ),
                 ],
               ),
-            ],
-          ),
+            ),
+            // 已过期印章：旧样式，由 showExpiredStamp 开关控制（当前关闭，改用单号旁标签）
+            if (isExpired && showExpiredStamp)
+              SvgPicture.asset(
+                'svg/yiguoqi.svg',
+                width: 61,
+                height: 46.3,
+                placeholderBuilder: (_) => const SizedBox.shrink(),
+              ),
+          ],
         ),
       ),
     );

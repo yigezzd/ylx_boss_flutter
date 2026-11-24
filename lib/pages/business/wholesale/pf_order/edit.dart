@@ -19,12 +19,14 @@ import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/scan_match_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 enum _PFAction { none, save, sign, delete, print, retsign, withdraw, generate }
@@ -146,6 +148,29 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
 
   final TextEditingController _scanController = TextEditingController();
   late final FocusNode _scanFocusNode;
+
+  /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入）
+  bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
+
+  /// 明细行输入失焦/编辑弹窗确认关闭后焦点“落空”时，将焦点恢复到红外扫描框，支持连续扫码；
+  /// 焦点已落到其他输入框（用户主动点按）时不干预；弹窗收尾动画中最多重试 30 帧再评估
+  void _returnFocusToScanIfIdle([int retryFrame = 0]) {
+    if (!_showScanInput) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanInput) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点；收尾动画中重试等待
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        if (retryFrame < 30) _returnFocusToScanIfIdle(retryFrame + 1);
+        return;
+      }
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
+  }
+
   bool _scanFieldFocused = false;
   Timer? _scanDebounceTimer;
   late ScanSettings _scanSettings;
@@ -182,6 +207,9 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
   bool get _isSubmitted => _signflag == '2';
 
   final List<_PFDetailRow> _items = [];
+
+  /// 未保存修改比对基线（进入页面/加载完成/保存完成后更新）
+  String _formSnapshot = '';
 
   @override
   void initState() {
@@ -233,6 +261,9 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
     } else {
       _loadNewModeDefaults();
     }
+    // 新增模式：默认值回填后建立基线，未改动直接返回不弹窗
+    // （默认仓库为异步回写，回写完成后在 _loadDefaultWarehouse 中再次重建基线）
+    _refreshSnapshot();
     logEnter();
   }
 
@@ -282,6 +313,8 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
           _counterid = first['counterid']?.toString();
           _warehouseController.text = first['countername']?.toString() ?? '';
         });
+        // 默认仓库异步回写属于初始化动作，回写后重建基线，避免零操作返回被误判为脏数据
+        _refreshSnapshot();
       }
     });
   }
@@ -373,12 +406,63 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
   }
 
+  // ═══ 返回与未保存修改检测 ═══
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _custid,
+      _storeid,
+      _counterid,
+      _salesid,
+      _remarkController.text,
+      jsonEncode(_fileLists),
+      _items
+          .map((r) =>
+              '${r.prodid}_${r.nameController.text}_${r.qtyController.text}_${r.priceController.text}_${r.presentQtyController.text}')
+          .join(','),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/待审核（signflag 0）单据；
+  /// 已审核(1)/待提交(2) 为只读或撤回态，无保存入口，直接放行
+  bool get _guardEnabled => (_signflag ?? '0') == '0';
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      _submit(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
   // ═══ 提交/保存 ═══
-  void _submit({bool doSign = false}) {
-    logSave(doSign ? '保存并审核' : _isEdit ? '保存修改' : '保存单据');
+  void _submit({bool doSign = false, bool popAfterSave = false}) {
+    logSave(doSign
+        ? '保存并审核'
+        : _isEdit
+            ? '保存修改'
+            : '保存单据');
     if (!_isSigned) {
       if (_custid == null || _custid!.isEmpty) {
         Toast.show('请选择客户');
@@ -496,6 +580,11 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
         }
       } else {
         if (!_isEdit) Navigator.pop(context, true);
+      }
+      // 返回拦截中选择「保存」：保存成功后直接返回上一页
+      // （上方无单号等分支可能已 pop，用 isCurrent 防止重复返回）
+      if (popAfterSave && !doSign && mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
+        Navigator.pop(context, true);
       }
     }).whenComplete(() {
       if (mounted && !doSign) setState(() => _submitAction = _PFAction.none);
@@ -867,6 +956,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
       'bsid': _storeid,
       'custid': _custid ?? '',
       'pfpriceflag': 1,
+      'bzshowflag': 1,
       'itemstatus': '1,2',
       'needbatchflag': 1,
       'counterid': _counterid,
@@ -892,14 +982,14 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
         // 对齐 lxAss：直接替换整个列表（而非追加）
         _items.clear();
         for (final prod in result) {
-          final originalPrice = prod['price']; // 保存用户修改的价格
+          // 选品页回传价格（defValSet 链值：custdiscountprice > custprice > price，或用户手动修改值）
+          final originalPrice = prod['price'];
           final row = _PFDetailRow();
           row.prodid = prod['prodid']?.toString() ?? prod['productid']?.toString() ?? '';
           row.nameController.text =
               prod['productname']?.toString() ?? prod['name']?.toString() ?? '';
           row.qtyController.text = (prod['qty'] ?? 1).toString();
-          row.priceController.text =
-              prod['pfprice1']?.toString() ?? prod['price']?.toString() ?? '0';
+          // 价格不预先写入：由 _defValSet 按 zmProMax defValSet 链计算（custdiscountprice > custprice > price）
           row.presentQtyController.text = (prod['giftqty'] ?? 0).toString();
           row.rawData = Map<String, dynamic>.from(prod);
           // 确保 sellprice 与 retailprice 同步（API 可能返回不同值）
@@ -908,13 +998,12 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
             row.rawData!['sellprice'] = row.rawData!['retailprice'];
           }
           _defValSet(row.rawData!);
-          // 对齐 lxAss：恢复用户修改的价格（避免被 defValSet 的 custprice 覆盖）
+          // 对齐 lxAss：恢复选品页回传的价格（defValSet 链值或用户手动修改值，避免被覆盖）
           if (originalPrice != null) {
             row.rawData!['price'] = originalPrice;
-            row.priceController.text = originalPrice.toString();
-          } else {
-            row.priceController.text = row.rawData!['price']?.toString() ?? '0';
+            _writeData('price', row.rawData!); // 重算 rate/amt，与恢复后的价格保持一致
           }
+          row.priceController.text = row.rawData!['price']?.toString() ?? '0';
           row.amt = _fd3(row.rawData!['amt']);
           // unshift 到列表首位（新增商品置顶显示）
           _items.insert(0, row);
@@ -997,6 +1086,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
       'custid': _custid ?? '',
       'pfpriceflag': 1,
       'needbatchflag': 1,
+      'bzshowflag': 1,
       'itemstatusin': '1,2',
     });
 
@@ -1031,10 +1121,10 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
       qty = scaleInfo.qty ?? 0;
     } else if (scaleInfo.type == 'amount') {
       // 金额码：按金额/单价反算，单价取 price → custprice → sellprice（对齐 lxAss）
-      final scalePrice = num.tryParse(
-              (prod['price'] ?? prod['custprice'] ?? prod['sellprice'] ?? 0).toString())
-          ?.toDouble() ??
-          0;
+      final scalePrice =
+          num.tryParse((prod['price'] ?? prod['custprice'] ?? prod['sellprice'] ?? 0).toString())
+                  ?.toDouble() ??
+              0;
       qty = scalePrice > 0 ? (scaleInfo.amount ?? 0) / scalePrice : baseQty + 1;
     } else {
       qty = baseQty + 1;
@@ -1073,13 +1163,19 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.transparent,
-        builder: (_) => _ProDetailSheet(
-          productData: Map<String, dynamic>.from(prod),
-          initialPrice: price,
-          initialQty: qty,
-          initialGiftQty: giftQty,
-          initialRemark: prod['remark']?.toString() ?? '',
-          onSelectUnitSize: (type) => _showExtendOptions(type, prod),
+        builder: (_) => AnimatedPadding(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+          // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+          padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+          child: _ProDetailSheet(
+            productData: Map<String, dynamic>.from(prod),
+            initialPrice: price,
+            initialQty: qty,
+            initialGiftQty: giftQty,
+            initialRemark: prod['remark']?.toString() ?? '',
+            onSelectUnitSize: (type) => _showExtendOptions(type, prod),
+          ),
         ),
       );
       if (result2 != null && mounted) {
@@ -1119,6 +1215,8 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
           _syncField(row.rawData, result2, 'mprice3');
           _syncField(row.rawData, result2, 'psprice');
           _syncField(row.rawData, result2, 'packagenum');
+          // 切换单位后同步商品名称：行数据与列表名称输入框
+          applyProductName(row.rawData, result2, nameController: row.nameController);
           // stockqty 同步
           final sq = result2['stockqty']?.toString();
           if (sq != null && sq.isNotEmpty) row.rawData!['stockqty'] = sq;
@@ -1305,11 +1403,10 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
                   final String code = item['scode']?.toString() ?? item['code']?.toString() ?? '';
                   return GestureDetector(
                     onTap: () {
-                      // lxAss selectUnitFn: price = custprice (pfsale)
-                      // lxAss selectSizeFn: price = sellprice (pfsale, pricetype=sellprice)
+                      // zmProMax unitConfirm/changeSize: price = custprice ?? 0
                       final price = type == 'size'
-                          ? (item['sellprice']?.toString() ??
-                              item['custprice']?.toString() ??
+                          ? (item['custprice']?.toString() ??
+                              item['sellprice']?.toString() ??
                               item['pfprice1']?.toString() ??
                               item['price']?.toString() ??
                               '')
@@ -1397,14 +1494,20 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ProDetailSheet(
-        productData: raw,
-        initialPrice: double.tryParse(row.priceController.text) ?? 0,
-        initialQty: double.tryParse(row.qtyController.text) ?? 0,
-        initialGiftQty: double.tryParse(row.presentQtyController.text) ?? 0,
-        initialRemark: raw['remark']?.toString() ?? '',
-        readOnly: _readOnly,
-        onSelectUnitSize: (type) => _showExtendOptions(type, raw),
+      builder: (_) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(_).viewInsets.bottom),
+        child: _ProDetailSheet(
+          productData: raw,
+          initialPrice: double.tryParse(row.priceController.text) ?? 0,
+          initialQty: double.tryParse(row.qtyController.text) ?? 0,
+          initialGiftQty: double.tryParse(row.presentQtyController.text) ?? 0,
+          initialRemark: raw['remark']?.toString() ?? '',
+          readOnly: _readOnly,
+          onSelectUnitSize: (type) => _showExtendOptions(type, raw),
+        ),
       ),
     );
     if (result != null && mounted) {
@@ -1449,6 +1552,8 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
           _syncField(r.rawData, result, 'mprice3');
           _syncField(r.rawData, result, 'psprice');
           _syncField(r.rawData, result, 'packagenum');
+          // 切换单位后同步商品名称：行数据与列表名称输入框
+          applyProductName(r.rawData, result, nameController: r.nameController);
           // 同步 stockqty
           final sq = result['stockqty']?.toString();
           if (sq != null && sq.isNotEmpty) r.rawData!['stockqty'] = sq;
@@ -1539,7 +1644,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1549,7 +1654,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? (_isSigned ? '批发订货详情' : '修改批发订货') : '新增批发订货',
@@ -1563,6 +1668,13 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
       body: _detailLoading
           ? const Center(child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF006EFF)))
           : _buildBody(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1615,6 +1727,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
                         readOnly: _readOnly,
                         onTap: () => _showProDetailDrawer(_items[index], index),
                         onToggle: () => _toggleIndex(index),
+                        onQtyBlur: _returnFocusToScanIfIdle,
                       ),
                     ),
                   ),
@@ -1644,7 +1757,9 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
         style: TextStyle(
           fontSize: 14,
           fontWeight: FontWeight.w500,
-          color: _signflag == '1' ? const Color(0xFF00A870) : (_signflag == '2' ? const Color(0xFFFF9900) : const Color(0xFFD54B5A)),
+          color: _signflag == '1'
+              ? const Color(0xFF00A870)
+              : (_signflag == '2' ? const Color(0xFFFF9900) : const Color(0xFFD54B5A)),
         ),
       ),
       child: Padding(
@@ -2282,7 +2397,8 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
     if (_isSubmitted) {
       return _buildBottomRow(
         buttons: [
-          _BottomBtn(label: '撤回', onTap: _restsign, perm: '012206', fillColor: const Color(0xFFFF9900)),
+          _BottomBtn(
+              label: '撤回', onTap: _restsign, perm: '012206', fillColor: const Color(0xFFFF9900)),
         ],
       );
     }
@@ -2482,9 +2598,7 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
         decoration: BoxDecoration(
           color: loading
               ? const Color(0xFFB0C4DE)
-              : fillColor ?? (primary
-                  ? const Color(0xFF006EFF)
-                  : Colors.white),
+              : fillColor ?? (primary ? const Color(0xFF006EFF) : Colors.white),
           borderRadius: BorderRadius.circular(8),
           border: fillColor != null
               ? null
@@ -2500,7 +2614,9 @@ class _PfOrderEditPageState extends State<PfOrderEditPage> with LogPageMixin<PfO
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w500,
-                  color: fillColor != null ? Colors.white : (primary ? Colors.white : const Color(0xFF333333)),
+                  color: fillColor != null
+                      ? Colors.white
+                      : (primary ? Colors.white : const Color(0xFF333333)),
                 ),
               ),
       ),
@@ -2581,6 +2697,7 @@ class _PFDetailItem extends StatefulWidget {
     this.readOnly = false,
     required this.onToggle,
     this.onTap,
+    this.onQtyBlur,
   });
   final _PFDetailRow row;
   final int index;
@@ -2589,6 +2706,9 @@ class _PFDetailItem extends StatefulWidget {
   final bool readOnly;
   final VoidCallback onToggle;
   final VoidCallback? onTap;
+
+  /// 数量失焦回调：父页面在焦点落空时将焦点恢复到扫描框
+  final VoidCallback? onQtyBlur;
 
   @override
   State<_PFDetailItem> createState() => _PFDetailItemState();
@@ -2609,6 +2729,10 @@ class _PFDetailItemState extends State<_PFDetailItem> {
     _PFDetailRow._addOnFocusSelectAll(_priceFocus, _priceCtrl);
     _PFDetailRow._addOnFocusSelectAll(_giftFocus, _giftCtrl);
     _PFDetailRow._addOnFocusSelectAll(_qtyFocus, _qtyCtrl);
+    // 数量失焦后通知父页面评估恢复扫描框焦点（连续扫码）
+    _qtyFocus.addListener(() {
+      if (!_qtyFocus.hasFocus) widget.onQtyBlur?.call();
+    });
   }
 
   @override
@@ -2723,6 +2847,7 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                               readOnly: widget.readOnly,
                               enabled: !widget.readOnly,
                               keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              textInputAction: TextInputAction.next,
                               textAlign: TextAlign.center,
                               style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
                               decoration: const InputDecoration(
@@ -2735,7 +2860,11 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                                     borderSide: BorderSide(color: Color(0xFF006EFF))),
                               ),
                               onChanged: (_) => _notifyChange(),
-                              onSubmitted: (_) => _notifyChange(),
+                              // Enter moves focus to the gift qty field (aligned with purchase instore)
+                              onSubmitted: (_) {
+                                _notifyChange();
+                                _giftFocus.requestFocus();
+                              },
                               onEditingComplete: _notifyChange,
                             ),
                           ),
@@ -2751,6 +2880,7 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                               readOnly: widget.readOnly,
                               enabled: !widget.readOnly,
                               keyboardType: const TextInputType.numberWithOptions(),
+                              textInputAction: TextInputAction.next,
                               textAlign: TextAlign.center,
                               style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
                               decoration: const InputDecoration(
@@ -2763,7 +2893,11 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                                     borderSide: BorderSide(color: Color(0xFF006EFF))),
                               ),
                               onChanged: (_) => _notifyChange(),
-                              onSubmitted: (_) => _notifyChange(),
+                              // Enter moves focus to the qty field (aligned with purchase instore)
+                              onSubmitted: (_) {
+                                _notifyChange();
+                                _qtyFocus.requestFocus();
+                              },
                               onEditingComplete: _notifyChange,
                             ),
                           ),
@@ -2779,6 +2913,7 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                               readOnly: widget.readOnly,
                               enabled: !widget.readOnly,
                               keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              textInputAction: TextInputAction.done,
                               textAlign: TextAlign.center,
                               style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
                               decoration: const InputDecoration(
@@ -2791,7 +2926,12 @@ class _PFDetailItemState extends State<_PFDetailItem> {
                                     borderSide: BorderSide(color: Color(0xFF006EFF))),
                               ),
                               onChanged: (_) => _notifyChange(),
-                              onSubmitted: (_) => _notifyChange(),
+                              // Enter on the last field drops focus; the parent then restores
+                              // focus to the scan input (aligned with purchase instore)
+                              onSubmitted: (_) {
+                                _notifyChange();
+                                _qtyFocus.unfocus();
+                              },
                               onEditingComplete: _notifyChange,
                             ),
                           ),
@@ -2940,8 +3080,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                 children: [
                   // 左侧占位，平衡关闭按钮宽度，标题居中
                   const SizedBox(width: 24),
-                  Expanded(
-                    child: const Text(
+                  const Expanded(
+                    child: Text(
                       '商品详情',
                       textAlign: TextAlign.center,
                       style: TextStyle(
@@ -3124,6 +3264,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                             'mprice3': _localData['mprice3']?.toString() ?? '',
                             'psprice': _localData['psprice']?.toString() ?? '',
                             'packagenum': _localData['packagenum']?.toString() ?? '',
+                            // 切换单位后的商品名称随弹窗返回，供列表回写
+                            ...unitNameFields(_localData),
                           });
                         },
                         style: ElevatedButton.styleFrom(
@@ -3157,6 +3299,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
       data['unit'] = _nonNullStr(result['unit']);
       final uoid = _nonNullStr(result['unitonlyid']);
       data['unitonlyid'] = uoid;
+      // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+      syncUnitProductName(data, result, unitonlyid: uoid);
       if (uoid.isNotEmpty) {
         data['size'] = data['_mainSize']?.toString() ?? data['size'];
         data['sizeonlyid'] = data['_mainSizeonlyid']?.toString() ?? '';

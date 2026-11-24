@@ -53,6 +53,12 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
   List<Map<String, dynamic>> _reviewBillFlows = [];
   String _userCode = '';
   String _userid = '';
+
+  /// 进价查看权限（对齐小程序 user.inpriceflag，1=可查看，缺失按无权限处理）
+  int _inpriceflag = 0;
+
+  /// 配送价查看权限（对齐小程序 user.pspriceflag，1=可查看，缺失按无权限处理）
+  int _pspriceflag = 0;
   Map<String, dynamic>? _savedSignData;
 
   /// 新单据时，根据机构查询是否需要审批签字，控制审核按钮显示（对齐 Vue billSign）
@@ -76,6 +82,10 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
   Timer? _scanDebounceTimer;
   bool _scanFieldFocused = false;
   bool _scanBusy = false;
+
+  /// 明细行内价格输入框：明细行 → (新价格字段 → 焦点/控制器)
+  /// 以行对象为键缓存，避免 rebuild 重建丢失焦点；删除/排序后也不会错配
+  final Map<Map<String, dynamic>, Map<String, _PriceField>> _priceFields = {};
 
   /// 吸顶区高度常量（对齐采购订货粘性表头）：扫码框区域 + 明细标题栏，区块固定高度确保总高精确无间隙
   static const double _scanStickyHeight = 68.0;
@@ -144,17 +154,26 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
     },
   ];
 
-  /// 调价范围可选项：商城调价(mdtype==2)仅展示商城零售价，
-  /// 其余渠道展示普通价格类型（对齐小程序 showPriceOptions）
+  /// 调价范围可选项：商城调价(mdtype==2)仅展示商城零售价，其余渠道展示普通价格类型（对齐小程序 showPriceOptions）；
+  /// 进价/配送价无查看权限时仍展示但禁止勾选，已勾选的不展示（提交值保持原单据勾选）
   List<Map<String, dynamic>> get _showPriceOptions {
-    if (_mdtype == 2) {
-      return _priceOptionsDef.where((opt) => opt['key'] == 'mdmallsell').toList();
-    }
-    return _priceOptionsDef.where((opt) => opt['key'] != 'mdmallsell').toList();
+    return _priceOptionsDef.where((opt) {
+      final key = opt['key'] as String;
+      if (_mdtype == 2) return key == 'mdmallsell';
+      return key != 'mdmallsell';
+    }).toList();
+  }
+
+  /// 调价范围选项是否禁止勾选（进价/配送价无查看权限时禁止勾选，对齐后台；管理员始终可勾选）
+  bool _isPriceOptionDisabled(String key) {
+    if (_isAdmin) return false;
+    if (key == 'mdinprice' && _inpriceflag != 1) return true;
+    if (key == 'mdpsprice' && _pspriceflag != 1) return true;
+    return false;
   }
 
   // 当前选中的调价范围（对应 query[key] 值，1=选中 0=未选中）
-  Map<String, int> _priceScope = {};
+  final Map<String, int> _priceScope = {};
 
   // 调价渠道选项（对齐小程序 mdtypeList）
   static const List<Map<String, dynamic>> _mdtypeList = [
@@ -198,6 +217,8 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
         final Map<String, dynamic> userMap = jsonDecode(userStr) as Map<String, dynamic>;
         _userid = userMap['userid']?.toString() ?? '';
         _userCode = userMap['code']?.toString() ?? '';
+        _inpriceflag = int.tryParse(userMap['inpriceflag']?.toString() ?? '') ?? 0;
+        _pspriceflag = int.tryParse(userMap['pspriceflag']?.toString() ?? '') ?? 0;
       }
     } catch (_) {}
 
@@ -271,6 +292,12 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
   void dispose() {
     _billnameCtrl.dispose();
     _scrollCtrl.dispose();
+    for (final fields in _priceFields.values) {
+      for (final editor in fields.values) {
+        editor.dispose();
+      }
+    }
+    _priceFields.clear();
     _scanDebounceTimer?.cancel();
     _scanController.dispose();
     _scanFocusNode.dispose();
@@ -486,8 +513,10 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
   // =================== 调价范围选择 ===================
   void _openPriceScopeSheet() {
     if (_disabled) return;
-    // 临时副本
+    // 临时副本（无权限项以未勾选展示，_priceScope 原值保留作为提交值）
     final tmpScope = Map<String, int>.from(_priceScope);
+    if (_isPriceOptionDisabled('mdinprice')) tmpScope['mdinprice'] = 0;
+    if (_isPriceOptionDisabled('mdpsprice')) tmpScope['mdpsprice'] = 0;
 
     showModalBottomSheet<void>(
       context: context,
@@ -532,6 +561,7 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
                         children: _showPriceOptions.map((opt) {
                           final key = opt['key'] as String;
                           final label = opt['label'] as String;
+                          final noPerm = _isPriceOptionDisabled(key);
                           return Padding(
                             padding: const EdgeInsets.symmetric(vertical: 6),
                             child: Row(
@@ -542,11 +572,13 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
                                 Checkbox(
                                   value: (tmpScope[key] ?? 0) == 1,
                                   activeColor: const Color(0xFF006EFF),
-                                  onChanged: (v) {
-                                    setSheetState(() {
-                                      tmpScope[key] = (v ?? false) ? 1 : 0;
-                                    });
-                                  },
+                                  onChanged: noPerm
+                                      ? null
+                                      : (v) {
+                                          setSheetState(() {
+                                            tmpScope[key] = (v ?? false) ? 1 : 0;
+                                          });
+                                        },
                                 ),
                               ],
                             ),
@@ -584,7 +616,13 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
                       Expanded(
                         child: GestureDetector(
                           onTap: () {
-                            setState(() => _priceScope = Map<String, int>.from(tmpScope));
+                            setState(() {
+                              // 无查看权限的价格类型不写回，保持单据原勾选值
+                              for (final entry in tmpScope.entries) {
+                                if (_isPriceOptionDisabled(entry.key)) continue;
+                                _priceScope[entry.key] = entry.value;
+                              }
+                            });
                             Navigator.pop(ctx);
                           },
                           child: Container(
@@ -610,10 +648,12 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
     );
   }
 
-  /// 获取已选调价范围的显示文本（仅统计当前渠道可见项，对齐小程序 showPriceOptions 过滤）
+  /// 获取已选调价范围的显示文本（仅统计当前渠道可见且可勾选项，无权限项不展示）
   String get _priceScopeText {
     final selected = _showPriceOptions
-        .where((opt) => (_priceScope[opt['key'] as String] ?? 0) == 1)
+        .where((opt) =>
+            !_isPriceOptionDisabled(opt['key'] as String) &&
+            (_priceScope[opt['key'] as String] ?? 0) == 1)
         .map((opt) => opt['label'] as String)
         .toList();
     return selected.isNotEmpty ? selected.join(',') : '';
@@ -742,6 +782,7 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
           'productid': productid,
           'bsid': bsid,
           'itemtype': mainRow['itemtype']?.toString() ?? '',
+          'searchstopflag': 0,
           'packageflag': mainRow['packageflag']?.toString() ?? '',
         });
         final responseData = res['data'];
@@ -762,6 +803,7 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
           'productid': productid,
           'bsid': bsid,
           'itemtype': mainRow['itemtype']?.toString() ?? '',
+          'searchstopflag': 0,
           'specflag': mainRow['specflag']?.toString() ?? '',
         });
         final responseData = res['data'];
@@ -825,12 +867,11 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
       main['code'] = pick(first?['scode'], first?['code']);
       // 单位名称/规格名称：主商品行还原为基础单位/基础规格
       main['unitname'] = pick(first?['sunit'], pick(first?['unit'], main['unitname']));
-      final firstSize = first?['size'];
-      if (!packlist.isNotEmpty) {
-        main['sizename'] = packlist[0]['size'];
-        main['size'] = packlist[0]['size'];
-      } else {
-        main['sizename'] = truthy(firstSize) ? firstSize : '';
+      // 基础规格取 sizelist 首条：packlist 主行的 sname 是后端镜像的单位名，用作规格会把单位写进规格列；
+      // 未拉取 sizelist 时保留录入行规格（对齐小程序 r138624）
+      if (sizelist.isNotEmpty) {
+        final firstSizeRow = toMap(sizelist[0]);
+        main['sizename'] = pick(firstSizeRow?['sname'], pick(firstSizeRow?['size'], ''));
       }
       formatPrices(main);
       effectiveMain = main;
@@ -865,6 +906,7 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
         newRow['code'] = pick(ud['scode'], ud['code']);
         // 单位名称
         newRow['unitname'] = pick(ud['sunit'], pick(ud['unit'], newRow['unitname']));
+        newRow['unitonlyid'] = ud['unitonlyid'];
         formatPrices(newRow);
         result.add(newRow);
       }
@@ -900,6 +942,7 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
         newRow['size'] = '';
         // 规格名称
         newRow['sizename'] = pick(sd['sname'], pick(sd['size'], newRow['sizename']));
+        newRow['sizeonlyid'] = sd['sizeonlyid'];
         formatPrices(newRow);
         result.add(newRow);
       }
@@ -938,6 +981,64 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
     if (!mounted) return;
     _scanFocusNode.requestFocus();
     SystemChannels.textInput.invokeMethod('TextInput.hide');
+  }
+
+  /// 取明细行内某价格字段的输入框状态（首次访问时创建）：
+  /// 聚焦时全选文本（参考采购入库单 _addOnFocusSelectAll / 促销调价单同款）；
+  /// 失焦时若为当前卡片最后一个价格行，则焦点回到扫码框，便于直接扫下一个商品
+  _PriceField _priceFieldOf(Map<String, dynamic> item, String field, String value) {
+    final fields = _priceFields.putIfAbsent(item, () => {});
+    return fields.putIfAbsent(field, () {
+      final editor = _PriceField();
+      editor.ctrl.text = value;
+      editor.focusNode.addListener(() {
+        if (editor.focusNode.hasFocus) {
+          if (editor.ctrl.text.isNotEmpty) {
+            editor.ctrl.selection =
+                TextSelection(baseOffset: 0, extentOffset: editor.ctrl.text.length);
+          }
+          return;
+        }
+        if (!_isLastVisiblePriceField(field)) {
+          return;
+        }
+        _focusScanInput();
+      });
+      return editor;
+    });
+  }
+
+  /// 当前卡片可见的价格行（按调价范围勾选顺序，无权限项不展示）
+  List<Map<String, dynamic>> _visiblePriceOptions() {
+    return _showPriceOptions.where((opt) {
+      final key = opt['key'] as String;
+      return !_isPriceOptionDisabled(key) && (_priceScope[key] ?? 0) == 1;
+    }).toList();
+  }
+
+  /// 是否为当前卡片最后一个可见价格行（用于失焦后回到扫码框）
+  bool _isLastVisiblePriceField(String field) {
+    final opts = _visiblePriceOptions();
+    if (opts.isEmpty) {
+      return false;
+    }
+    return opts.last['newpreice'] == field;
+  }
+
+  /// 焦点回到扫码枪输入框（参考采购入库单 _focusAfterScan / 促销调价单同款）：
+  /// 帧后聚焦并隐藏软键盘；焦点已落在其它具体控件（如点了另一输入框）时不抢占
+  void _focusScanInput() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _scanFocusNode.hasFocus) {
+        return;
+      }
+      final primary = FocusManager.instance.primaryFocus;
+      if (primary != null && primary is! FocusScopeNode) {
+        return;
+      }
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
   }
 
   /// 扫码枪输入框（参考采购入库单 _buildScanInput：白色圆角卡片包裹）
@@ -1117,6 +1218,8 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
       disabled: _disabled,
       unitDisabled: _syncProductUnit,
       sizeDisabled: _syncProductSize,
+      // 对齐小程序 r138624：单位/规格选项拉取带上 searchstopflag=0
+      mergData: {'searchstopflag': 0},
       showShelves: false,
     );
     if (updated != null && mounted && index >= 0 && index < _detailList.length) {
@@ -1257,7 +1360,10 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
       'reviewremark': '',
       // 调价范围
       ...{for (final opt in _priceOptionsDef) opt['key'] as String: _priceScope[opt['key']] ?? 0},
-      'detailList': _detailList.map((item) {
+      'detailList': _detailList
+          // 提交前过滤无商品 id 的空行（与 Web 端 save 的过滤对齐，避免分店单据明细多存一条）
+          .where((item) => (item['productid']?.toString() ?? '').isNotEmpty)
+          .map((item) {
         final m = Map<String, dynamic>.from(item);
         // if()
         if (m['packageflag'] == 1 && m['unit'] == m['unitname']) {
@@ -2125,17 +2231,35 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
     );
   }
 
-  /// 根据选中的调价范围动态生成价格行
+  /// 根据选中的调价范围动态生成价格行（遍历当前渠道可见且可勾选项，无权限项不展示）
+  /// 价格行按展示顺序串联焦点：回车跳到下一行，最后一个价格行失焦后焦点回到扫码框
   List<Widget> _buildDynamicPriceRows(Map<String, dynamic> item) {
+    final visibleOpts = _visiblePriceOptions();
+    // 先取好每行的输入框状态，用于串联「回车跳到下一行」
+    final editors = <_PriceField>[];
+    for (final opt in visibleOpts) {
+      final yprice = opt['yprice'] as String;
+      final newpreice = opt['newpreice'] as String;
+      final origRaw = MathUtils.formatDecimal(2, item[yprice] ?? 0);
+      final value = item[newpreice]?.toString() ?? origRaw;
+      final editor = _priceFieldOf(item, newpreice, value);
+      // 未聚焦时同步最新值（首次加载、失焦格式化、加价自动回填其它价格），聚焦中不打断输入
+      if (!editor.focusNode.hasFocus && editor.ctrl.text != value) {
+        editor.ctrl.text = value;
+      }
+      editors.add(editor);
+    }
+
     final rows = <Widget>[];
-    for (final opt in _priceOptionsDef) {
-      final key = opt['key'] as String;
-      if ((_priceScope[key] ?? 0) != 1) continue;
+    for (var i = 0; i < visibleOpts.length; i++) {
+      final opt = visibleOpts[i];
       final label = opt['label'] as String;
       final yprice = opt['yprice'] as String;
       final newpreice = opt['newpreice'] as String;
-      final origVal = MathUtils.formatDecimal(2, item[yprice] ?? 0);
-      final newVal = item[newpreice]?.toString() ?? origVal;
+      final origRaw = MathUtils.formatDecimal(2, item[yprice] ?? 0);
+      final editor = editors[i];
+      // 有下一行时回车键显示「下一项」，最后一行显示「完成」
+      final nextFocusNode = i + 1 < editors.length ? editors[i + 1].focusNode : null;
 
       rows.add(const Divider(height: 1, color: Color(0xFFF3F4F6)));
       rows.add(Padding(
@@ -2145,20 +2269,29 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
             width: 80,
             child: Text(label, style: const TextStyle(fontSize: 13, color: Color(0xFF333333))),
           ),
-          Text(origVal, style: const TextStyle(fontSize: 13, color: Color(0xFF7A7A7A))),
+          Text(origRaw, style: const TextStyle(fontSize: 13, color: Color(0xFF7A7A7A))),
           const Spacer(),
           SizedBox(
             width: 100,
             child: Builder(
               builder: (inputCtx) {
                 return TextField(
-                  controller: TextEditingController(text: newVal),
+                  controller: editor.ctrl,
+                  focusNode: editor.focusNode,
                   enabled: !_disabled,
+                  // 有下一项时回车键显示「下一项」，否则显示「完成」
+                  textInputAction:
+                      nextFocusNode != null ? TextInputAction.next : TextInputAction.done,
                   // 键盘弹出时预留滚动余量，确保输入框完整露出不被遮挡
                   scrollPadding: const EdgeInsets.only(bottom: 120),
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
                   textAlign: TextAlign.right,
                   onTap: () {
+                    // 点击聚焦时同样全选（代码聚焦场景由节点监听处理）
+                    if (editor.ctrl.text.isNotEmpty) {
+                      editor.ctrl.selection =
+                          TextSelection(baseOffset: 0, extentOffset: editor.ctrl.text.length);
+                    }
                     // 键盘弹出会压缩视口，等键盘动画结束后再滚动到输入框，
                     // 避免“点击时可见、键盘弹出后被遮挡”的时序问题
                     Future.delayed(const Duration(milliseconds: 350), () {
@@ -2200,11 +2333,16 @@ class _StoreChangePriceEditPageState extends State<StoreChangePriceEditPage> {
                   onSubmitted: (v) {
                     item[newpreice] = v;
                     _priceBlur(item, newpreice);
+                    // 回显格式化后的值（控制器已按行缓存，不再随重建新建）
+                    editor.ctrl.text = item[newpreice]?.toString() ?? v;
                     if (mounted) setState(() {});
+                    // 录入完成后光标跳到下一个价格行（最后一行由失焦监听回扫码框）
+                    nextFocusNode?.requestFocus();
                   },
                   onTapOutside: (_) {
                     // 失焦时格式化 + 自动加价（对齐小程序 priceBlur）
                     _priceBlur(item, newpreice);
+                    editor.ctrl.text = item[newpreice]?.toString() ?? editor.ctrl.text;
                     if (mounted) setState(() {});
                   },
                 );
@@ -2790,6 +2928,17 @@ class _ApprovalLogSheet extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// 明细行内价格输入框的焦点与控制器（按行缓存复用，保证聚焦全选与光标状态稳定）
+class _PriceField {
+  final FocusNode focusNode = FocusNode();
+  final TextEditingController ctrl = TextEditingController();
+
+  void dispose() {
+    focusNode.dispose();
+    ctrl.dispose();
   }
 }
 

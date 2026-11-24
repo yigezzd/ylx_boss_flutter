@@ -37,3 +37,17 @@
 -keep class com.gainscha.**{*;}
 -dontwarn com.gainscha.**
 -keep class com.jcraft.jzlib.**{*;}
+
+#极光推送 JPush（release 开启混淆时保留 SDK 类，避免反射调用失败）
+-dontwarn cn.jpush.**
+-keep class cn.jpush.** { *; }
+-keep class * extends cn.jpush.android.service.JPushMessageReceiver { *; }
+-dontwarn cn.jiguang.**
+-keep class cn.jiguang.** { *; }
+
+# 华为厂商通道：保留 HMS / AGConnect 反射入口及注解，不屏蔽全局混淆告警
+-keepattributes *Annotation*,Exceptions,InnerClasses,Signature,SourceFile,LineNumberTable
+-keep class com.hianalytics.android.** { *; }
+-keep class com.huawei.updatesdk.** { *; }
+-keep class com.huawei.hms.** { *; }
+-keep class com.huawei.agconnect.** { *; }

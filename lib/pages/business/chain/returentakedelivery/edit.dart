@@ -17,11 +17,13 @@ import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 enum _ReturnTakeAction { none, save, sign, delete, retsign, print, withdraw }
@@ -84,6 +86,9 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
   String? _newBillid;
   List<Map<String, dynamic>> _fileLists = [];
 
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
+
   bool get _isEdit =>
       (_newBillid != null && _newBillid!.isNotEmpty) ||
       (widget.billData != null && (widget.billData!['billid']?.toString().isNotEmpty ?? false));
@@ -112,6 +117,10 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
     if (_isEdit && !PermissionUtils.checkPermission('013503', showTip: false)) return true;
     return false;
   }
+
+  /// 机构可编辑条件：仅新增单据（未保存、无 billid）可选；
+  /// 待审核状态下配送中心、退货门店不可修改（收货仓库仍可修改）
+  bool get _storeEditable => !_isEdit;
 
   final List<_DetailRow> _items = [];
 
@@ -177,6 +186,9 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
     } catch (_) {}
     if (_isEdit) {
       _loadDetail();
+    } else {
+      // 新增模式：以默认值作为快照基准
+      _refreshSnapshot();
     }
     logEnter();
   }
@@ -260,12 +272,62 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
         _handleCounterConfirm(data);
       }
     }).whenComplete(() {
-      if (mounted) setState(() => _detailLoading = false);
+      if (mounted) {
+        setState(() => _detailLoading = false);
+        // 详情加载完成后刷新快照基准
+        _refreshSnapshot();
+      }
     });
   }
 
+  // =================== 返回与未保存修改检测 ===================
+  String _buildSnapshot() {
+    return [
+      _insid ?? '',
+      _outsid ?? '',
+      _incounterid ?? '',
+      _outhandlerid ?? '',
+      _inhandlerid ?? '',
+      _psuserid ?? '',
+      _remarkController.text,
+      '${_fileLists.length}:${_fileLists.map((e) => e['filename']?.toString() ?? '').join(',')}',
+      _items
+          .map((r) => [
+                r.prodid,
+                r.qtyController.text,
+                r.priceController.text,
+                r.amtController.text,
+                r.batchController.text,
+              ].join('_'))
+          .join(','),
+    ].join('|');
+  }
+
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 确认保存：保存成功后返回上一页
+      _submit(popAfterSave: true);
+    } else if (result == false) {
+      // 不保存：直接返回上一页
+      if (mounted) Navigator.pop(context, true);
+    }
+    // result == null：点击遮罩取消，留在当前页
+  }
+
   // =================== 提交保存 ===================
-  void _submit({bool withSign = false, bool skipSavePermissionCheck = false}) {
+  void _submit(
+      {bool withSign = false, bool skipSavePermissionCheck = false, bool popAfterSave = false}) {
     // 撤回走 save(1) 时仅要求审核权限 013505（对齐 Vue restsign），跳过保存权限校验
     if (!skipSavePermissionCheck && !PermissionUtils.checkPermission('013503', showTip: false)) {
       Toast.show('你无权保存配退收货单，请在后台修改权限');
@@ -358,6 +420,11 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
           _parseReviewList(retData['reviewFlowUsers']).isNotEmpty;
       if (!enterApproval) {
         Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      }
+      // 返回时确认保存的场景：保存成功后直接返回上一页，不再重载详情
+      if (popAfterSave) {
+        Navigator.pop(context, true);
+        return;
       }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
@@ -744,6 +811,8 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
       // 对齐 Vue：bsid 取退货门店，counterid 取收货仓库
       'bsid': _outsid ?? '',
       'counterid': counterid,
+      // 配送业务标识：按配送价查询（对齐 Vue pspriceflag: 1）
+      'pspriceflag': 1,
     };
     request(HttpApi.dborderUpdateLsPrice, params).then((result) {
       if (!mounted) return;
@@ -1295,7 +1364,7 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final Widget page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1305,7 +1374,7 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? (_isSigned || _isRejected ? '配退收货单详情' : '修改配退收货单') : '新增配退收货单',
@@ -1316,6 +1385,13 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
       body: _detailLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : _buildBody(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1552,13 +1628,16 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
     // 左侧标签文字宽度在原 80 基础上增加 1/3（80*4/3≈107），避免"配退申请单号"等长标签折行
     const double labelWidth = 107;
     return Column(children: [
-      // 配送中心/退货门店对齐 Vue jumpPge('insid'/'outsid')：仅 _readOnly（disabled）时锁定
-      SelectFieldItem(
-          label: '配送中心',
-          labelWidth: labelWidth,
-          required: true,
-          value: _instorename ?? '',
-          onTap: _selectInStore),
+      // 配送中心：仅新增时可选择；待审核状态不可修改，只读单行展示（收货仓库仍可修改，故不与仓库合并）
+      if (_storeEditable)
+        SelectFieldItem(
+            label: '配送中心',
+            labelWidth: labelWidth,
+            required: true,
+            value: _instorename ?? '',
+            onTap: _selectInStore)
+      else
+        _buildReadonlyField(label: '配送中心', value: _instorename ?? ''),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
           label: '收货仓库',
@@ -1567,12 +1646,16 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
           value: _incountername ?? '',
           onTap: _selectInCounter),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
-      SelectFieldItem(
-          label: '退货门店',
-          labelWidth: labelWidth,
-          required: true,
-          value: _outstorename ?? '',
-          onTap: _selectOutStore),
+      // 退货门店：仅新增时可选择；待审核状态不可修改
+      if (_storeEditable)
+        SelectFieldItem(
+            label: '退货门店',
+            labelWidth: labelWidth,
+            required: true,
+            value: _outstorename ?? '',
+            onTap: _selectOutStore)
+      else
+        _buildReadonlyField(label: '退货门店', value: _outstorename ?? ''),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       // 配退申请单/配退发货单仅展示（对齐 Vue disabled input）
       SelectFieldItem(
@@ -1898,7 +1981,8 @@ class _ReturnTakeDeliveryEditPageState extends State<ReturnTakeDeliveryEditPage>
   static Widget _buildReadonlyField({required String label, required String value}) {
     return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Row(children: [
+        // 右侧文字过长换行时，标签与右侧文字第一行对齐（顶部对齐），不做整体垂直居中
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           SizedBox(
               // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
               width: 107,
@@ -2062,6 +2146,8 @@ class _DetailItemState extends State<_DetailItem> {
         raw['size'] = result['size']?.toString() ?? '';
         raw['unitonlyid'] = result['unitonlyid']?.toString() ?? '';
         raw['sizeonlyid'] = result['sizeonlyid']?.toString() ?? '';
+        // 切换单位后同步商品名称：行数据与列表名称输入框
+        applyProductName(raw, result, nameController: widget.row.nameController);
         raw['remark'] = result['remark']?.toString() ?? '';
         // 对齐 Vue unitConfirm/handleBatchConfirm 回填：换算率/售价/条码/自编码/货架号/配送前库存
         final packagenum = result['packagenum']?.toString() ?? '';
@@ -2113,39 +2199,40 @@ class _DetailItemState extends State<_DetailItem> {
         : widget.row.amtController.text;
 
     return RepaintBoundary(
-      child: Container(
-        decoration: BoxDecoration(
-          color: widget.index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
-        ),
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (widget.isSelectMode) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: Checkbox(
-                        value: widget.isSelected,
-                        activeColor: const Color(0xFF006EFF),
-                        onChanged: (_) => widget.onToggle(),
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: GestureDetector(
+        // 整卡可点击：点击任意区域弹出商品详情（选择模式下复选框仍独立响应）
+        onTap: widget.readOnly ? null : _editDetail,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          decoration: BoxDecoration(
+            color: widget.index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
+          ),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (widget.isSelectMode) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: Checkbox(
+                          value: widget.isSelected,
+                          activeColor: const Color(0xFF006EFF),
+                          onChanged: (_) => widget.onToggle(),
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                // 列1: 商品名称（点击弹商品详情弹窗）
-                Expanded(
-                  flex: 6,
-                  child: GestureDetector(
-                    onTap: widget.readOnly ? null : _editDetail,
-                    behavior: HitTestBehavior.opaque,
+                    const SizedBox(width: 8),
+                  ],
+                  // 列1: 商品名称
+                  Expanded(
+                    flex: 6,
                     child: Text(
                       _formatProductName(productname, size, unit),
                       style: const TextStyle(
@@ -2154,42 +2241,42 @@ class _DetailItemState extends State<_DetailItem> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                // 列2: 数量（对齐 Vue：'数量：' + formatDecimal(1, item.qty || 0)）
-                Expanded(
-                  flex: 4,
-                  child: Text(
-                    '数量：$qtyText',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
-                    textAlign: TextAlign.right,
+                  const SizedBox(width: 8),
+                  // 列2: 数量（对齐 Vue：'数量：' + formatDecimal(1, item.qty || 0)）
+                  Expanded(
+                    flex: 4,
+                    child: Text(
+                      '数量：$qtyText',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                      textAlign: TextAlign.right,
+                    ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(children: [
-              // 配送价（对齐 Vue：'配送价：' + formatDecimal(2, item.price || '')）
-              Expanded(
-                  flex: 6,
-                  child: Text('配送价：$priceText',
-                      style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)))),
-              // 配送金额（对齐 Vue：'配送金额：' + formatDecimal(3, item.amt || 0)）
-              Expanded(
-                  flex: 4,
-                  child: Text('配送金额：$amtText',
-                      style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-                      textAlign: TextAlign.right))
-            ]),
-            const SizedBox(height: 6),
-            // 批次（对齐 Vue：batchno 为 null/undefined 显示'无批次'）
-            Text(
-              batchno.isNotEmpty ? '批次：$batchno' : '无批次',
-              style: TextStyle(
-                  fontSize: 11,
-                  color: batchno.isNotEmpty ? const Color(0xFF9CA3AF) : const Color(0xFF006EFF)),
-            ),
-          ],
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(children: [
+                // 配送价（对齐 Vue：'配送价：' + formatDecimal(2, item.price || '')）
+                Expanded(
+                    flex: 6,
+                    child: Text('配送价：$priceText',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)))),
+                // 配送金额（对齐 Vue：'配送金额：' + formatDecimal(3, item.amt || 0)）
+                Expanded(
+                    flex: 4,
+                    child: Text('配送金额：$amtText',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                        textAlign: TextAlign.right))
+              ]),
+              const SizedBox(height: 6),
+              // 批次（对齐 Vue：batchno 为 null/undefined 显示'无批次'）
+              Text(
+                batchno.isNotEmpty ? '批次：$batchno' : '无批次',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: batchno.isNotEmpty ? const Color(0xFF9CA3AF) : const Color(0xFF006EFF)),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2418,6 +2505,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                                 'size': _currentSize,
                                 'unitonlyid': _unitonlyid,
                                 'sizeonlyid': _sizeonlyid,
+                                // 切换单位后的商品名称随弹窗返回，供列表回写
+                                ...unitNameFields(widget.productData),
                                 'packagenum': d['packagenum']?.toString() ?? '',
                                 'sellprice': d['sellprice']?.toString() ?? '',
                                 'barcode': d['barcode']?.toString() ?? '',

@@ -13,6 +13,7 @@ import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
 import 'package:flutter_deer/widgets/date_range_picker.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 /// 客户结算单编辑页 —— 对齐 boss 项目 custPlierpayEdit.vue
@@ -36,6 +37,9 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
   Map<String, dynamic> _formData = {};
   List<Map<String, dynamic>> _custpayflow = [];
   List<Map<String, dynamic>> _allBills = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   // ── 多级审批 ──
   List<Map<String, dynamic>> _reviewFlowUsers = [];
@@ -127,6 +131,7 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
       }
     } catch (_) {}
     if (_isEdit) _loadData();
+    _refreshSnapshot();
   }
 
   @override
@@ -215,6 +220,7 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
           _reviewFlowUsers = _parseReviewList(data['reviewFlowUsers']);
           _reviewBillFlows = _parseReviewList(data['reviewBillFlows']);
         });
+        _refreshSnapshot();
       }
     } catch (_) {
       if (mounted) Toast.show('加载失败');
@@ -745,9 +751,55 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
     obj['isort'] = index + 1;
   }
 
+  // =================== 返回与未保存修改检测 ===================
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _custid,
+      _bsid,
+      _handlerid,
+      _bankid,
+      _payway,
+      _startdate,
+      _enddate,
+      _paytime,
+      _remarkCtl.text,
+      _payamtCtl.text,
+      _freeamtCtl.text,
+      _prepaidamtCtl.text,
+      _custpayflow
+          .map((e) => '${e['custbillid']}_${e['payamt']}_${e['freeamt']}_${e['prepaidamt']}')
+          .join(','),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      await _handleSave(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
   // =================== 保存 / 审核 / 作废 / 删除 / 撤回 ===================
 
-  Future<void> _handleSave([int sign = 0]) async {
+  Future<void> _handleSave({int sign = 0, bool popAfterSave = false}) async {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('014503', showTip: false)) {
         Toast.show('你无权编辑客户结算，请在后台修改权限');
@@ -836,6 +888,10 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
         if (sign == 1) {
           _handleSignAfterSave(data is Map<String, dynamic> ? data : null, isWithdraw: isWithdraw);
         }
+        // 保存成功后刷新快照，避免返回时误报未保存
+        _refreshSnapshot();
+        // 返回时确认保存的场景：保存成功后返回上一页；普通保存仍留在当前页（对齐 Vue 行为）
+        if (popAfterSave && sign == 0 && mounted) Navigator.pop(context, true);
       }
     } catch (_) {
       if (mounted) Toast.show('保存失败');
@@ -1041,7 +1097,7 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
     );
     if (confirm != true) return;
     _formData['reviewsignflag'] = 2;
-    await _handleSave(1);
+    await _handleSave(sign: 1);
   }
 
   void _handlePrint() {
@@ -1098,7 +1154,7 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
       statusColor = const Color(0xFFD54B5A);
     }
 
-    return Scaffold(
+    final Widget page = Scaffold(
       backgroundColor: const Color(0xFFF5F7FA),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1111,7 +1167,7 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context, true),
+          onPressed: _onBackPressed,
         ),
       ),
       body: Stack(children: [
@@ -1187,6 +1243,13 @@ class _CustomerPayEditPageState extends State<CustomerPayEditPage> {
         if (_loading || _billLoading) _loadingCard,
       ]),
       bottomNavigationBar: _buildBottomBar(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 

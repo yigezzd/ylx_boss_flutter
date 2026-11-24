@@ -17,12 +17,14 @@ import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 enum _ReturnApplicationAction { none, save, sign, delete, retsign, print, withdraw }
@@ -94,6 +96,9 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
   Map<String, dynamic>? _billData;
   String? _newBillid;
   List<Map<String, dynamic>> _fileLists = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   bool get _isEdit =>
       (_newBillid != null && _newBillid!.isNotEmpty) ||
@@ -202,6 +207,8 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
       _loadDetail();
     } else {
       _loadNewModeDefaults();
+      // 新增模式：以默认值作为快照基准
+      _refreshSnapshot();
     }
     logEnter();
   }
@@ -320,12 +327,64 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
         });
       }
     }).whenComplete(() {
-      if (mounted) setState(() => _detailLoading = false);
+      if (mounted) {
+        setState(() => _detailLoading = false);
+        // 详情加载完成后刷新快照基准
+        _refreshSnapshot();
+      }
     });
   }
 
+  // =================== 返回与未保存修改检测 ===================
+  String _buildSnapshot() {
+    return [
+      _insid ?? '',
+      _incounterid ?? '',
+      _outsid ?? '',
+      _outcounterid ?? '',
+      _outhandlerid ?? '',
+      _inhandlerid ?? '',
+      _refundtype.toString(),
+      _urgentflag.toString(),
+      _pstimeController.text,
+      _remarkController.text,
+      '${_fileLists.length}:${_fileLists.map((e) => e['filename']?.toString() ?? '').join(',')}',
+      _items
+          .map((r) => [
+                r.prodid,
+                r.qtyController.text,
+                r.priceController.text,
+                r.amtController.text,
+              ].join('_'))
+          .join(','),
+    ].join('|');
+  }
+
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 确认保存：保存成功后返回上一页
+      _submit(popAfterSave: true);
+    } else if (result == false) {
+      // 不保存：直接返回上一页
+      if (mounted) Navigator.pop(context, true);
+    }
+    // result == null：点击遮罩取消，留在当前页
+  }
+
   // =================== 提交保存 ===================
-  void _submit({bool withSign = false, bool skipSavePermissionCheck = false}) {
+  void _submit(
+      {bool withSign = false, bool skipSavePermissionCheck = false, bool popAfterSave = false}) {
     // 撤回走 save(1) 时仅要求审核权限 013305（对齐 Vue restsign），跳过保存权限校验
     if (!skipSavePermissionCheck && !PermissionUtils.checkPermission('013303', showTip: false)) {
       Toast.show('你无权保存配退申请单，请在后台修改权限');
@@ -412,6 +471,11 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
           _parseReviewList(retData['reviewFlowUsers']).isNotEmpty;
       if (!enterApproval) {
         Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      }
+      // 返回时确认保存的场景：保存成功后直接返回上一页，不再重载详情
+      if (popAfterSave) {
+        Navigator.pop(context, true);
+        return;
       }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
@@ -803,6 +867,8 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
       'outsid': _outsid ?? '',
       'incounterid': _incounterid ?? '',
       'outcounterid': _outcounterid ?? '',
+      // 配送业务标识：按配送价查询（对齐 Vue pspriceflag: 1）
+      'pspriceflag': 1,
       // 对齐 Vue form.bsidtype = 'outsid'
       'bsid': _outsid ?? '',
       'detaillist': detaillist,
@@ -862,6 +928,9 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
           raw['inprice'] =
               MathUtils.formatDecimal(2, double.tryParse(m['inprice'].toString()) ?? 0);
         }
+        // 价格同步后回写商品最新的规格、单位 id（对齐 Vue updateTableDataInPlace）
+        if (m['newsizeonlyid'] != null) raw['sizeonlyid'] = m['newsizeonlyid'].toString();
+        if (m['newunitonlyid'] != null) raw['unitonlyid'] = m['newunitonlyid'].toString();
         r.priceController.text = raw['price']?.toString() ?? '';
         _applyWriteData(raw);
         r.amt = double.tryParse(raw['amt']?.toString() ?? '') ?? r.amt;
@@ -1307,6 +1376,12 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
       data['qty'] = newQty;
       data['price'] = newPrice;
       data['amt'] = newAmt;
+      // 对齐 Vue proDetails：切换单位后回填最新商品名称
+      final popName = result['productname']?.toString() ?? '';
+      if (popName.isNotEmpty) {
+        data['productname'] = popName;
+        data['name'] = popName;
+      }
       data['unit'] = result['unit']?.toString() ?? '';
       data['size'] = result['size']?.toString() ?? '';
       data['unitonlyid'] = result['unitonlyid']?.toString() ?? '';
@@ -1562,7 +1637,7 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final Widget page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1572,7 +1647,7 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? (_isSigned || _isRejected ? '配退申请单详情' : '修改配退申请单') : '新增配退申请单',
@@ -1583,6 +1658,13 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
       body: _detailLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : _buildBody(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1635,7 +1717,10 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
                           bsid: _outsid ?? '',
                           counterid: _outcounterid ?? '',
                           onToggle: () => _toggleIndex(index),
-                          onChanged: () => setState(() {}))))),
+                          onChanged: () {
+                            setState(() {});
+                            _returnFocusToScanIfIdle();
+                          })))),
         if (_items.isEmpty)
           const SliverToBoxAdapter(
               child: Padding(
@@ -1654,6 +1739,25 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
 
   /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入）
   bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
+
+  /// 明细编辑弹窗确认关闭后焦点“落空”时，将焦点恢复到红外扫描框，支持连续扫码；
+  /// 焦点已落到其他输入框（用户主动点按）时不干预；弹窗收尾动画中最多重试 30 帧再评估
+  void _returnFocusToScanIfIdle([int retryFrame = 0]) {
+    if (!_showScanInput) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanInput) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点；收尾动画中重试等待
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        if (retryFrame < 30) _returnFocusToScanIfIdle(retryFrame + 1);
+        return;
+      }
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
+  }
 
   // =================== 条码扫描输入框（对齐 allot_apply） ===================
   Widget _buildScanInput() {
@@ -2247,7 +2351,8 @@ class _ReturnApplicationEditPageState extends State<ReturnApplicationEditPage>
   static Widget _buildReadonlyField({required String label, required String value}) {
     return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Row(children: [
+        // 右侧文字过长换行时，标签与右侧文字第一行对齐（顶部对齐），不做整体垂直居中
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           SizedBox(
               // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
               width: 107,
@@ -2384,14 +2489,25 @@ class _DetailItemState extends State<_DetailItem> {
       widget.row.priceController.text = MathUtils.formatDecimal(2, newPrice);
       widget.row.amt = newAmt;
       widget.row.amtController.text = MathUtils.formatDecimal(3, newAmt);
+      // 对齐 Vue proDetails：切换单位后回填最新商品名称（列表与提交均取该名称）
+      final newName = result['productname']?.toString() ?? '';
+      if (newName.isNotEmpty) {
+        widget.row.nameController.text = newName;
+      }
       if (raw != null) {
         raw['qty'] = newQty;
         raw['price'] = newPrice;
         raw['amt'] = newAmt;
+        if (newName.isNotEmpty) {
+          raw['productname'] = newName;
+          raw['name'] = newName;
+        }
         raw['unit'] = result['unit']?.toString() ?? '';
         raw['size'] = result['size']?.toString() ?? '';
         raw['unitonlyid'] = result['unitonlyid']?.toString() ?? '';
         raw['sizeonlyid'] = result['sizeonlyid']?.toString() ?? '';
+        // 切换单位后同步商品名称：行数据与列表名称输入框
+        applyProductName(raw, result, nameController: widget.row.nameController);
         raw['remark'] = result['remark']?.toString() ?? '';
         // 对齐 Vue unitConfirm/changeSize 回填：换算率/售价/进价/条码/自编码/货架号
         final packagenum = result['packagenum']?.toString() ?? '';
@@ -2442,39 +2558,40 @@ class _DetailItemState extends State<_DetailItem> {
         : widget.row.amtController.text;
 
     return RepaintBoundary(
-      child: Container(
-        decoration: BoxDecoration(
-          color: widget.index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
-        ),
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (widget.isSelectMode) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: Checkbox(
-                        value: widget.isSelected,
-                        activeColor: const Color(0xFF006EFF),
-                        onChanged: (_) => widget.onToggle(),
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: GestureDetector(
+        // 整卡可点击：点击任意区域弹出商品详情（选择模式下复选框仍独立响应）
+        onTap: widget.readOnly ? null : _editDetail,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          decoration: BoxDecoration(
+            color: widget.index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
+          ),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (widget.isSelectMode) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: Checkbox(
+                          value: widget.isSelected,
+                          activeColor: const Color(0xFF006EFF),
+                          onChanged: (_) => widget.onToggle(),
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                // 列1: 商品名称（点击弹商品详情弹窗）
-                Expanded(
-                  flex: 6,
-                  child: GestureDetector(
-                    onTap: widget.readOnly ? null : _editDetail,
-                    behavior: HitTestBehavior.opaque,
+                    const SizedBox(width: 8),
+                  ],
+                  // 列1: 商品名称
+                  Expanded(
+                    flex: 6,
                     child: Text(
                       _formatProductName(productname, size, unit),
                       style: const TextStyle(
@@ -2483,32 +2600,32 @@ class _DetailItemState extends State<_DetailItem> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  // 列2: 配退数量（右对齐）
+                  Expanded(
+                    flex: 4,
+                    child: Text('配退数量：$qtyText',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                        textAlign: TextAlign.right),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(children: [
+                Expanded(
+                  flex: 6,
+                  child: Text('价格：¥$priceText',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
                 ),
-                const SizedBox(width: 8),
-                // 列2: 配退数量（右对齐）
                 Expanded(
                   flex: 4,
-                  child: Text('配退数量：$qtyText',
-                      style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                  child: Text('金额：$amtText',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                       textAlign: TextAlign.right),
                 ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(children: [
-              Expanded(
-                flex: 6,
-                child: Text('价格：¥$priceText',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-              ),
-              Expanded(
-                flex: 4,
-                child: Text('金额：$amtText',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-                    textAlign: TextAlign.right),
-              ),
-            ]),
-          ],
+              ]),
+            ],
+          ),
         ),
       ),
     );
@@ -2715,10 +2832,14 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                                 'price': MathUtils.formatDecimalNum(2, _price),
                                 'amt': _amt,
                                 'remark': _remarkCtrl.text.trim(),
+                                // 切换单位/规格后的商品名称（对齐 Vue proDetails 回传商品名）
+                                'productname': widget.productData['productname']?.toString() ?? '',
                                 'unit': _currentUnit,
                                 'size': _currentSize,
                                 'unitonlyid': _unitonlyid,
                                 'sizeonlyid': _sizeonlyid,
+                                // 切换单位后的商品名称随弹窗返回，供列表回写
+                                ...unitNameFields(widget.productData),
                                 'packagenum': d['packagenum']?.toString() ?? '',
                                 'sellprice': d['sellprice']?.toString() ?? '',
                                 'inprice': d['inprice']?.toString() ?? '',
@@ -2991,10 +3112,21 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     setState(() {
       final d = widget.productData;
       if (type == 'unit') {
+        // 对齐 Vue proDetails.selectUnitFn：切换单位时同步商品名称
+        // 直接用接口回传的包装名称 packname；未回传时用接口回传的商品名称 name
+        final String packName = r['packname']?.toString() ?? '';
+        final String resName = r['name']?.toString() ?? '';
+        final String newProductName = packName.isNotEmpty ? packName : resName;
+        if (newProductName.isNotEmpty) {
+          d['productname'] = newProductName;
+          d['name'] = newProductName;
+        }
         final u = r['unit']?.toString() ?? r['_name']?.toString() ?? '';
         if (u.isNotEmpty) _currentUnit = u;
         final uid = r['unitonlyid']?.toString() ?? r['_id']?.toString() ?? '';
         _unitonlyid = uid;
+        // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+        syncUnitProductName(d, r, unitonlyid: uid);
         // 对齐 Vue unitConfirm：price = lspsprice（配送价）
         final lspsprice = r['lspsprice']?.toString();
         if (lspsprice != null && lspsprice.isNotEmpty) {

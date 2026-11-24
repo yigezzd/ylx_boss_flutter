@@ -10,6 +10,7 @@ import 'package:flutter_deer/pages/business/inventory/movewarehouse/add.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/review_nav_state.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
@@ -54,7 +55,8 @@ class _InventoryMovewarehouseListPageState extends State<InventoryMovewarehouseL
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _statusIndex = ReviewNavState.consumePendingStatusIndex();
+    _tabController = TabController(length: 4, vsync: this, initialIndex: _statusIndex);
     _tabController.addListener(() {
       if (!_tabController.indexIsChanging) {
         setState(() {

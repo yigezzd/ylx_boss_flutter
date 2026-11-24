@@ -7,17 +7,19 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'voice_secret.dart';
+
 /// 阿里云 NLS 实时语音识别工具类
 ///
 /// 使用 WebSocket 协议与阿里云 NLS 网关通信，
 /// 支持流式发送 PCM 音频数据并获取实时/最终识别结果。
 class VoiceRecognitionUtil {
   static const String _wsUrl = 'wss://nls-gateway.cn-shanghai.aliyuncs.com/ws/v1';
-  static const String _appKey = 'QYd2qTabwi5r6lnM';
+  static const String _appKey = VoiceSecret.appKey;
 
   // 阿里云 AccessKey（与 Vue 端一致）
-  static const String _accessKeyId = 'LTAI5tGGdy73N1DF9NPnDv1F';
-  static const String _accessKeySecret = 'yWMleUU8Rcxos41AImZNwaoochZheZ';
+  static const String _accessKeyId = VoiceSecret.accessKeyId;
+  static const String _accessKeySecret = VoiceSecret.accessKeySecret;
   static const String _nlsMetaUrl = 'https://nls-meta.cn-shanghai.aliyuncs.com';
 
   // Token 缓存
@@ -84,7 +86,8 @@ class VoiceRecognitionUtil {
       final normalizedQuery = normalizedParts.join('&');
 
       // 4. 构造待签名字符串: GET&%2F&<encodedQuery>
-      final stringToSign = 'GET&${Uri.encodeComponent('/')}&${Uri.encodeComponent(normalizedQuery)}';
+      final stringToSign =
+          'GET&${Uri.encodeComponent('/')}&${Uri.encodeComponent(normalizedQuery)}';
 
       // 5. HMAC-SHA1 签名（key 需要加 &）
       final hmacKey = utf8.encode('$_accessKeySecret&');

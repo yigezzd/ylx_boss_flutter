@@ -8,6 +8,7 @@ import 'package:flutter_deer/pages/business/finance/router.dart';
 import 'package:flutter_deer/routers/fluro_navigator.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/review_config_utils.dart';
+import 'package:flutter_deer/util/review_nav_state.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
@@ -64,7 +65,8 @@ class _StorePayListPageState extends State<StorePayListPage> with TickerProvider
 
     // 同步创建默认3个Tab（不含"已驳回"），确保首次 build 时 TabBar 的 controller 非空，
     // 避免 TabBar 隐式使用 DefaultTabController 触发 _dependencies 断言失败（对齐采购入库列表）
-    _tabController = TabController(length: 3, vsync: this);
+    _statusIndex = ReviewNavState.consumePendingStatusIndex();
+    _tabController = TabController(length: 3, vsync: this, initialIndex: _statusIndex);
     _tabController!.addListener(_onTabChanged);
 
     final now = DateTime.now();
@@ -849,9 +851,9 @@ class _StorePayListPageState extends State<StorePayListPage> with TickerProvider
       parentCtx,
       title: '选择应付门店',
       searchHint: '输入门店名称',
-      // 对齐 Vue storePlierpay.vue：storetypes=[0,1,2]，排除已选应收门店
+      // 对齐 Vue storePlierpay.vue：storetypes=[0,1,2,3,4]，排除已选应收门店
       fetchData: (search, page) => request(HttpApi.storeGetList, {
-        'storetypes': [0, 1, 2],
+        'storetypes': [0, 1, 2, 3, 4],
         'cond': search,
         'is_page': 1,
         'page': page,
@@ -875,7 +877,7 @@ class _StorePayListPageState extends State<StorePayListPage> with TickerProvider
     required void Function(String id, String name) onSelected,
     String? initialSelectedId,
   }) async {
-    // 对齐 Vue storePlierpay.vue：storetypes=[0,3] + psselecttype=2 + nosidsflag，排除已选应付门店
+    // 对齐 Vue storePlierpay.vue：storetypes=[0,1,2,3,4] + psselecttype=2 + nosidsflag，排除已选应付门店
     final nosidsflag =
         SelectStorePage.loginStoreField('id') == SelectStorePage.loginStoreField('spid')
             ? '1'
@@ -885,7 +887,7 @@ class _StorePayListPageState extends State<StorePayListPage> with TickerProvider
       title: '选择应收门店',
       searchHint: '输入门店名称',
       fetchData: (search, page) => request(HttpApi.storeGetList, {
-        'storetypes': [0, 3],
+        'storetypes': [0, 1, 2, 3, 4],
         'psselecttype': 2,
         'nosidsflag': nosidsflag,
         'cond': search,

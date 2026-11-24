@@ -7,6 +7,7 @@ import 'package:flutter_deer/net/http_helper.dart';
 import 'package:flutter_deer/pages/business/inventory/plan/add.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/review_nav_state.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
@@ -53,6 +54,9 @@ class _InventoryPlanListPageState extends State<InventoryPlanListPage>
   @override
   void initState() {
     super.initState();
+    // 盘点计划无“待审核”Tab（index 1 为“待盘点”），审批提醒跳转时仅读取并清零标志，
+    // 避免残留影响后续正常进入的其它列表页，本页仍默认停留“全部”
+    ReviewNavState.consumePendingStatusIndex();
     _tabController = TabController(length: 4, vsync: this);
     _tabController.addListener(() {
       if (!_tabController.indexIsChanging) {

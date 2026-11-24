@@ -19,12 +19,14 @@ import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 enum _DeliveryAction { none, save, sign, delete, retsign, print, withdraw }
@@ -116,6 +118,9 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
   Map<String, dynamic>? _billData;
   String? _newBillid;
   List<Map<String, dynamic>> _fileLists = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   bool get _isEdit =>
       (_newBillid != null && _newBillid!.isNotEmpty) ||
@@ -231,6 +236,8 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       _loadDetail();
     } else {
       _loadNewModeDefaults();
+      // 新增模式：以默认值作为快照基准
+      _refreshSnapshot();
     }
     logEnter();
   }
@@ -334,6 +341,8 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
     }).whenComplete(() {
       if (mounted) {
         setState(() => _detailLoading = false);
+        // 详情加载完成后刷新快照基准
+        _refreshSnapshot();
         // 对齐 Vue getInfo：加载调入/调出机构类型
         _loadStoreTypes();
       }
@@ -362,8 +371,57 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
     }
   }
 
+  // =================== 返回与未保存修改检测 ===================
+  String _buildSnapshot() {
+    return [
+      _outsid ?? '',
+      _outcounterid ?? '',
+      _insid ?? '',
+      _incounterid ?? '',
+      _psuserid ?? '',
+      _outhandlerid ?? '',
+      _inhandlerid ?? '',
+      _dbbillid ?? '',
+      _billdateController.text,
+      _remarkController.text,
+      '${_fileLists.length}:${_fileLists.map((e) => e['filename']?.toString() ?? '').join(',')}',
+      _items
+          .map((r) => [
+                r.prodid,
+                r.qtyController.text,
+                r.priceController.text,
+                r.amtController.text,
+                r.batchController.text,
+              ].join('_'))
+          .join(','),
+    ].join('|');
+  }
+
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 确认保存：保存成功后返回上一页
+      await _submit(popAfterSave: true);
+    } else if (result == false) {
+      // 不保存：直接返回上一页
+      if (mounted) Navigator.pop(context, true);
+    }
+    // result == null：点击遮罩取消，留在当前页
+  }
+
   // =================== 提交保存 ===================
-  Future<void> _submit({bool withSign = false, bool skipStockCheck = false}) async {
+  Future<void> _submit(
+      {bool withSign = false, bool skipStockCheck = false, bool popAfterSave = false}) async {
     if (!PermissionUtils.checkPermission('012803', showTip: false)) {
       Toast.show('你无权保存调拨出库单，请在后台修改权限');
       return;
@@ -501,6 +559,11 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       if (!enterApproval) {
         Toast.show(result['retmsg']?.toString() ?? '保存成功');
       }
+      // 返回时确认保存的场景：保存成功后直接返回上一页，不再重载详情
+      if (popAfterSave) {
+        Navigator.pop(context, true);
+        return;
+      }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
         if (isNew) {
@@ -509,12 +572,16 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
             setState(() => _newBillid = newBillid);
           }
           // 对齐 cgplan _saveAndAudit：保存成功后先同步回写 retData 至 _billData，
-          // 保证紧随其后的审核流程（_doSign）能取到单据数据；_loadDetail 随后以 getInfo 结果覆盖
+          // 保证紧随其后的审核流程（_doSign）能取到单据数据
           _billData = Map<String, dynamic>.from(retData);
         }
-        _loadDetail(Map<String, dynamic>.from(retData));
         if (withSign && PermissionUtils.checkPermission('012805', showTip: false)) {
+          // 保存并审核：审核（含库存不足/零数量弹窗）结束后再重载详情。
+          // 若此处立即 getInfo 重建明细，弹窗确认时按行对象移除/写回会误清空商品，
+          // 导致“继续审核”后无明细、无法提交审核
           _doSignAfterSave(retData, skipStockCheck: skipStockCheck);
+        } else {
+          _loadDetail(Map<String, dynamic>.from(retData));
         }
       }
     }).whenComplete(() {
@@ -594,9 +661,13 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
     if (result == null || !mounted) return false;
     // 对齐 Vue handleProductNotqtyConfirm：移除已删行并按新数量重算金额
     setState(() {
-      _items.removeWhere((row) => !result.contains(row));
-      for (final row in result) {
-        _recalcRowAmt(row);
+      final keptRows = result.toSet();
+      // 仅当弹窗确认的行仍属于当前明细时移除被删行，避免明细被重载后误清空
+      if (_items.any((row) => keptRows.contains(row))) {
+        _items.removeWhere((row) => !keptRows.contains(row));
+        for (final row in result) {
+          _recalcRowAmt(row);
+        }
       }
     });
     return true;
@@ -637,9 +708,13 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
 
     // 写回数量、移除已删行并重算金额（对齐 Vue handleStockLessConfirm 的 writeData）
     setState(() {
-      _items.removeWhere((row) => !result.contains(row));
-      for (final row in result) {
-        _recalcRowAmt(row);
+      final keptRows = result.toSet();
+      // 仅当弹窗确认的行仍属于当前明细时移除被删行，避免明细被重载后误清空
+      if (_items.any((row) => keptRows.contains(row))) {
+        _items.removeWhere((row) => !keptRows.contains(row));
+        for (final row in result) {
+          _recalcRowAmt(row);
+        }
       }
     });
 
@@ -851,8 +926,8 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
     }
   }
 
-  /// 选择调出机构后自动带出默认出库仓库（对齐 Vue watch outsid）
-  /// 按 countertype 优先级取默认仓库：零售(0) > 常温(1) > 冷藏(2) > 冷冻(3)
+  /// 选择调出机构后自动带出默认出库仓库（对齐 Vue resolveDeliveryDefaultOutCounter）：
+  /// 已选调入仓库时按其温层与两端机构类型匹配，未选时按 零售(0) → 常温(1) → 冷藏(2) → 冷冻(3)
   void _autoFillOutCounter(String outsid) {
     request(HttpApi.counterGetList, {
       'sids': [int.tryParse(outsid) ?? 0],
@@ -863,29 +938,35 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       final data = result['data'];
       final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
       if (list.isEmpty) return;
-      // 筛选默认出库仓库（stockoutflag==1），按 countertype 优先级取默认仓库：
-      // 零售(0) > 常温(1) > 冷藏(2) > 冷冻(3)，无类型字段的排在最后
-      final sorted = list
+      // 筛选默认出库仓库（stockoutflag==1）
+      final candidates = list
           .whereType<Map<String, dynamic>>()
           .where((e) => e['stockoutflag']?.toString() == '1')
-          .toList()
-        ..sort((a, b) {
-          final va = int.tryParse(a['countertype']?.toString() ?? '');
-          final vb = int.tryParse(b['countertype']?.toString() ?? '');
-          if (va == null && vb == null) return 0;
-          if (va == null) return 1; // 无类型排最后
-          if (vb == null) return -1;
-          return va.compareTo(vb);
-        });
-      if (sorted.isEmpty) return;
-      final r = sorted.first;
+          .toList();
+      if (candidates.isEmpty) return;
+      final String ins = _inStoretype?.toString() ?? '';
+      final String outs = _outStoretype?.toString() ?? '';
+      final String incType = _incountertype ?? '';
+      Map<String, dynamic>? picked;
+      if ((_incounterid ?? '').isNotEmpty) {
+        if ((outs == '0' && incType == '0') || outs == '1') {
+          if (ins == '0') {
+            picked = _findCounterByType(candidates, '0');
+          } else if (ins == '3') {
+            picked = _findCounterByType(candidates, incType);
+          } else {
+            picked = candidates.first;
+          }
+        } else if ((outs == '0' && incType != '0') || outs == '3') {
+          picked = _findCounterByType(candidates, incType);
+        }
+      } else {
+        picked = _pickCounterByTypes(candidates, const [0, 1, 2, 3]);
+      }
+      if (picked == null) return;
+      final r = picked;
       final rowType = r['countertype']?.toString() ?? '';
       final bool isZd = _spid != null && outsid == _spid.toString();
-      // 对齐 Vue watch outsid：已选调入仓库且存储方式不一致时仅提示，不带出
-      if ((_incounterid ?? '').isNotEmpty && _incountertype != rowType) {
-        Toast.show('调入仓库与调出仓库的仓库类型不一致');
-        return;
-      }
       setState(() {
         _outcounterid = r['counterid']?.toString() ?? '';
         _outcountername = r['countername']?.toString() ?? '';
@@ -895,6 +976,17 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
         }
       });
     });
+  }
+
+  /// 按温层优先级顺序取第一个命中的仓库，types 的顺序即优先级
+  static Map<String, dynamic>? _pickCounterByTypes(
+      List<Map<String, dynamic>> list, List<int> types) {
+    for (final type in types) {
+      for (final item in list) {
+        if (item['countertype']?.toString() == type.toString()) return item;
+      }
+    }
+    return null;
   }
 
   /// 选择调入机构（对齐 Vue inStoreMergeData + handleInStoreConfirm）
@@ -932,7 +1024,66 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
           _outcountertype = null;
         }
       });
+      // 对齐 Vue watch insid：新增时自动带出默认入库仓库（inflag==1）
+      if (newInid.isNotEmpty && !_isEdit) {
+        _autoFillInCounter(newInid);
+      }
     }
+  }
+
+  /// 选择调入机构后自动带出默认入库仓库（对齐 Vue resolveDeliveryDefaultInCounter）：
+  /// 仅新增单据带出；默认仓库需为入库仓（inflag==1）；
+  /// 已选调出仓库时按两端机构类型与其温层匹配，未选时按零售(0) → 常温(1) → 冷藏(2) → 冷冻(3) 优先级
+  void _autoFillInCounter(String insid) {
+    request(HttpApi.counterGetList, {
+      'sids': [int.tryParse(insid) ?? 0],
+      'is_page': 0,
+      'stopflag': 0,
+    }).then((result) {
+      if (!mounted || _insid != insid) return;
+      final data = result['data'];
+      final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
+      final candidates = list
+          .whereType<Map<String, dynamic>>()
+          .where((e) => e['inflag']?.toString() == '1')
+          .toList();
+      if (candidates.isEmpty) return;
+      // 对齐 Vue resolveDeliveryDefaultInCounter：以调入机构类型与调出仓库类型为判断主体
+      final String ins = _inStoretype?.toString() ?? '';
+      final String outs = _outStoretype?.toString() ?? '';
+      final String outCounterType = _outcountertype ?? '';
+      Map<String, dynamic>? row;
+      if ((_outcounterid ?? '').isNotEmpty) {
+        if ((ins == '0' && outCounterType == '0') || ins == '1') {
+          if (outs == '0') {
+            row = _findCounterByType(candidates, '0');
+          } else if (outs == '3') {
+            row = _findCounterByType(candidates, outCounterType);
+          } else {
+            row = candidates.first;
+          }
+        } else if ((ins == '0' && outCounterType != '0') || ins == '3') {
+          row = _findCounterByType(candidates, outCounterType);
+        }
+      } else {
+        row = _pickCounterByTypes(candidates, const [0, 1, 2, 3]);
+      }
+      if (row == null) return;
+      final picked = row;
+      setState(() {
+        _incounterid = picked['counterid']?.toString() ?? '';
+        _incountername = picked['countername']?.toString() ?? '';
+        _incountertype = picked['countertype']?.toString() ?? '';
+      });
+    });
+  }
+
+  /// 按仓库温层取第一个命中的仓库
+  static Map<String, dynamic>? _findCounterByType(List<Map<String, dynamic>> list, String type) {
+    for (final item in list) {
+      if (item['countertype']?.toString() == type) return item;
+    }
+    return null;
   }
 
   /// 出库仓库与调入仓库类型一致性校验（对齐配退申请 returnapplication 的仓库类型联动）：
@@ -941,6 +1092,8 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
   bool _isCounterTypeMatched() {
     if (_outStoretype != 3 || _inStoretype != 3) return true;
     if ((_outcounterid ?? '').isEmpty || (_incounterid ?? '').isEmpty) return true;
+    // 调入仓库为零售仓（countertype=0）时不做仓库类型限制
+    if ((_incountertype ?? '') == '0') return true;
     if (_outcountertype == _incountertype) return true;
     Toast.show('出库仓库与配送中心仓库类型不一致，请重新选择');
     return false;
@@ -953,6 +1106,8 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       return;
     }
     final bool isZd = _spid != null && _outsid == _spid.toString();
+    // 调入仓库为零售仓（countertype=0）时不做仓库条件限制
+    final bool noCounterLimit = (_incountertype ?? '') == '0';
     final result = await CommonSelectSheet.show(
       context,
       title: '选择调出仓库',
@@ -966,9 +1121,9 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
         'nosidsflag': 1,
         'stopflag': 0,
         // 对齐 Vue outWareMergeData：本店调出且调入机构含配送时仅限配送仓
-        'countertype': isZd && _instoretypes.contains(1) ? '0' : '',
+        'countertype': noCounterLimit ? '' : (isZd && _instoretypes.contains(1) ? '0' : ''),
         // 对齐 Vue outWareMergeData：pscounterflag = outstoretypes 含 3 时取调入机构 id
-        'pscounterflag': _outstoretypes.contains(3) ? (_insid ?? '') : '',
+        'pscounterflag': noCounterLimit ? '' : (_outstoretypes.contains(3) ? (_insid ?? '') : ''),
         'cond': searchText,
         'is_page': 1,
         'page': page,
@@ -986,15 +1141,17 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
           _inStoretype == 3 &&
           (_incounterid ?? '').isNotEmpty &&
           (_incountertype ?? '').isNotEmpty &&
+          (_incountertype ?? '') != '0' &&
           newType != _incountertype) {
         Toast.show('出库仓库与配送中心仓库类型不一致，请重新选择');
         return;
       }
-      // 对齐 Vue handleOutCounterConfirm：调入仓库已选且存储方式不一致时拦截（非本店或调入机构为配送时）
+      // 新选调出仓库为非零售仓（countertype!=0）时须与已选调入仓库存储方式一致；零售仓不校验
       if ((_incounterid ?? '').isNotEmpty &&
           (_incountertype ?? '').isNotEmpty &&
-          newType != _incountertype &&
-          (!isZd || _inStoretype == 3)) {
+          (_incountertype ?? '') != '0' &&
+          newType != '0' &&
+          newType != _incountertype) {
         Toast.show('调出仓库和调入仓库的存储方式（常温、冷藏、冷冻）需一致');
         return;
       }
@@ -1052,15 +1209,17 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
           _inStoretype == 3 &&
           (_outcounterid ?? '').isNotEmpty &&
           (_outcountertype ?? '').isNotEmpty &&
+          newType != '0' &&
           newType != _outcountertype) {
         Toast.show('出库仓库与配送中心仓库类型不一致，请重新选择');
         return;
       }
-      // 对齐 Vue handleInCounterConfirm：调出仓库已选且存储方式不一致时拦截（非本店或调出机构为配送时）
+      // 调出仓库为非零售仓（countertype!=0）时调入仓库须校验存储方式一致；调入为零售仓不校验
       if ((_outcounterid ?? '').isNotEmpty &&
           (_outcountertype ?? '').isNotEmpty &&
-          newType != _outcountertype &&
-          (!isZd || _outStoretype == 3)) {
+          _outcountertype != '0' &&
+          newType != '0' &&
+          newType != _outcountertype) {
         Toast.show('调出仓库和调入仓库的存储方式（常温、冷藏、冷冻）需一致');
         return;
       }
@@ -1192,14 +1351,42 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       ),
     );
     if (result != null && mounted) {
-      _loadFromAllotApply(result['billid']?.toString() ?? '');
+      _loadFromAllotApply(result);
     }
   }
 
+  /// 清空调拨申请单：确认后移除单号及由申请单带出的商品明细
+  Future<void> _clearAllotApply() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('提示'),
+        content: const Text('清空调拨申请单会同时清空当前商品，是否继续？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确定')),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    setState(() {
+      _dbbillid = null;
+      _dbbillno = null;
+      for (final row in _items) {
+        row.dispose();
+      }
+      _items.clear();
+      _selectedIndices.clear();
+      _isSelectMode = false;
+    });
+  }
+
   /// 从调拨申请单加载数据（对齐 Vue orderFormItem confirm：不覆盖机构字段，明细带出）
-  void _loadFromAllotApply(String billid) {
+  void _loadFromAllotApply(Map<String, dynamic> bill) {
+    final String billid = bill['billid']?.toString() ?? '';
     if (billid.isEmpty) return;
-    request(HttpApi.dborderGetInfo, {'billid': billid}).then((result) {
+    // 接口需接收整张调拨申请单对象（仅传 billid 会异常），故将选中行整单透传
+    request(HttpApi.dborderGetInfo, Map<String, dynamic>.from(bill)).then((result) {
       if (!mounted) return;
       final data = result['data'];
       if (data is! Map<String, dynamic>) return;
@@ -1216,21 +1403,31 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
         for (final v in list) {
           if (v is! Map) continue;
           final c = Map<String, dynamic>.from(v);
-          // 对齐 Vue confirm：单价=进价、数量按开关与已入数量计算、金额独立计算
-          final double qty0 = double.tryParse(c['qty']?.toString() ?? '0') ?? 0;
-          final double rrqty = double.tryParse(c['rrqty']?.toString() ?? '0') ?? 0;
-          final double price = double.tryParse(c['inprice']?.toString() ?? '0') ?? 0;
-          final double costprice = double.tryParse(c['costprice']?.toString() ?? '0') ?? 0;
-          final double sellprice = double.tryParse(c['sellprice']?.toString() ?? '0') ?? 0;
-          final double newQty = _lsPsOrderQtyFlag() ? 0 : MathUtils.subtract(qty0, rrqty);
-          c['price'] = MathUtils.formatDecimal(2, price);
-          c['qty'] = MathUtils.formatDecimal(1, newQty);
-          c['amt'] = MathUtils.formatDecimal(2, MathUtils.mul(newQty, price));
-          c['costamt'] = MathUtils.formatDecimal(2, MathUtils.mul(newQty, costprice));
-          c['sellamt'] = MathUtils.formatDecimal(2, MathUtils.mul(newQty, sellprice));
+          // 行价统一承载配送价：申请单无配送价时以单据行价兜底，与选品/扫描口径一致
+          final double lspspriceRaw = double.tryParse(c['lspsprice']?.toString() ?? '') ?? 0;
+          final double rowPriceRaw = double.tryParse(c['price']?.toString() ?? '') ?? 0;
+          c['lspsprice'] =
+              MathUtils.formatDecimal(2, lspspriceRaw != 0 ? lspspriceRaw : rowPriceRaw);
           c['stockoutqty'] =
-              MathUtils.formatDecimal(1, double.tryParse(c['outstockqty']?.toString() ?? '0') ?? 0);
-          _applyWriteData(c);
+              MathUtils.formatDecimal(1, double.tryParse(c['outstockqty']?.toString() ?? '') ?? 0);
+          // 单价取调拨价 dbprice
+          c['price'] =
+              MathUtils.formatDecimal(2, double.tryParse(c['dbprice']?.toString() ?? '') ?? 0);
+          // 数量：开带出 0，否则按申请数量 - 已入数量
+          final double qty0 = double.tryParse(c['qty']?.toString() ?? '') ?? 0;
+          final double rrqty = double.tryParse(c['rrqty']?.toString() ?? '') ?? 0;
+          final double newQty = _lsPsOrderQtyFlag() ? 0 : MathUtils.subtract(qty0, rrqty);
+          c['qty'] = MathUtils.formatDecimal(1, newQty);
+          // 金额 = 数量 × 调拨价；成本金额 = 数量 × 成本价（对齐 Vue：amt 2 位、costamt 3 位）
+          final double price = double.tryParse(c['price']?.toString() ?? '') ?? 0;
+          final double costprice = double.tryParse(c['costprice']?.toString() ?? '') ?? 0;
+          c['amt'] = MathUtils.formatDecimal(2, MathUtils.mul(newQty, price));
+          c['costamt'] = MathUtils.formatDecimal(3, MathUtils.mul(newQty, costprice));
+          // 申请数量取 dqty，差异数量 = 数量 - 申请数量
+          c['orderqty'] =
+              MathUtils.formatDecimal(1, double.tryParse(c['dqty']?.toString() ?? '') ?? 0);
+          final double orderqty = double.tryParse(c['orderqty']?.toString() ?? '') ?? 0;
+          c['cyqty'] = MathUtils.formatDecimal(1, MathUtils.subtract(newQty, orderqty));
 
           final row = _DetailRow();
           row.prodid = c['productid']?.toString() ?? c['prodid']?.toString() ?? '';
@@ -1300,6 +1497,7 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
             'memorytype': _incountertype ?? '',
             'counterid': _outcounterid ?? '',
             'pspriceflag': 1,
+            'dbpriceflag': 1, // 查调拨价：返回 dbprice，非 0 时作为单价（对齐 Vue dbck）
           },
           multiple: true,
           showSelectedCount: true,
@@ -1334,8 +1532,13 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       _items.clear();
       for (final prod in result) {
         final c = Map<String, dynamic>.from(prod);
-        // 对齐 Vue productConfirm：单价=进价，调出库存=机构库存
-        c['price'] = c['inprice']?.toString() ?? c['price']?.toString() ?? '0';
+        // 单价：dbpriceflag=1 后端返回调拨价 dbprice，非 0 时优先取 dbprice
+        // （对齐 Vue dbck writeData：lspsprice(=dbprice) 优先于进价）；
+        // dbprice 为 0 时保持原有取价（进价 inprice → 选品页配送价 price）。调出库存=机构库存
+        final dbPrice = double.tryParse(c['dbprice']?.toString() ?? '') ?? 0;
+        c['price'] = dbPrice != 0
+            ? c['dbprice'].toString()
+            : (c['inprice']?.toString() ?? c['price']?.toString() ?? '0');
         c['stockoutqty'] = c['outstockqty']?.toString() ?? c['stockoutqty']?.toString() ?? '';
         _applyWriteData(c);
         final row = _DetailRow()
@@ -1418,6 +1621,7 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       'itemstatusin': '1,2,3,4',
       'memorytype': _incountertype ?? '',
       'counterid': _outcounterid ?? '',
+      'dbpriceflag': 1, // 查调拨价：返回 dbprice，非 0 时作为单价（对齐 Vue dbck 扫码查询）
     }).then((result) {
       if (!mounted) return;
       final data = result['data'];
@@ -1434,8 +1638,12 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       }
       final prod = list.first as Map<String, dynamic>;
       final c = Map<String, dynamic>.from(prod);
-      // 对齐 Vue productConfirm/handleProperty：扫码带入单价=进价
-      c['price'] = c['inprice']?.toString() ?? c['price']?.toString() ?? '0';
+      // 扫码带入单价：dbpriceflag=1 后端返回调拨价 dbprice，非 0 时优先取 dbprice
+      // （对齐 Vue dbck：lspsprice = dbprice || lspsprice || 0）；dbprice 为 0 时保持原有取价（进价 inprice → price）
+      final dbPrice = double.tryParse(c['dbprice']?.toString() ?? '') ?? 0;
+      c['price'] = dbPrice != 0
+          ? c['dbprice'].toString()
+          : (c['inprice']?.toString() ?? c['price']?.toString() ?? '0');
       c['stockoutqty'] = c['outstockqty']?.toString() ?? c['stockoutqty']?.toString() ?? '';
       double qty = double.tryParse(c['qty']?.toString() ?? '0') ?? 0;
       if (scaleInfo?.type == 'weight') {
@@ -1703,7 +1911,7 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final Widget page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1713,7 +1921,7 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? (_isSigned ? '调拨出库单详情' : (_isRejected ? '调拨出库单详情' : '修改调拨出库单')) : '新增调拨出库单',
@@ -1724,6 +1932,13 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
       body: _detailLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : _buildBody(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1799,7 +2014,10 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
                         insid: _insid ?? '',
                         outsid: _outsid ?? '',
                         onToggle: () => _toggleIndex(index),
-                        onChanged: () => setState(() {}),
+                        onChanged: () {
+                          setState(() {});
+                          _returnFocusToScanIfIdle();
+                        },
                       ),
                     ),
                   ),
@@ -1829,6 +2047,25 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
 
   /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入）
   bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
+
+  /// 明细编辑弹窗确认关闭后焦点“落空”时，将焦点恢复到红外扫描框，支持连续扫码；
+  /// 焦点已落到其他输入框（用户主动点按）时不干预；弹窗收尾动画中最多重试 30 帧再评估
+  void _returnFocusToScanIfIdle([int retryFrame = 0]) {
+    if (!_showScanInput) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanInput) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点；收尾动画中重试等待
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        if (retryFrame < 30) _returnFocusToScanIfIdle(retryFrame + 1);
+        return;
+      }
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
+  }
 
   // =================== 条码扫描输入框（对齐 allot_apply） ===================
   Widget _buildScanInput() {
@@ -2149,7 +2386,27 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
           onTap: _selectInCounter),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
-          label: '调拨申请单', labelWidth: labelWidth, value: _dbbillno ?? '', onTap: _selectAllotApply),
+          label: '调拨申请单',
+          labelWidth: labelWidth,
+          value: _dbbillno ?? '',
+          onTap: _selectAllotApply,
+          // 已选申请单时展示清空按钮（清空单号及带出的商品）
+          trailing: (_dbbillno ?? '').isNotEmpty
+              ? GestureDetector(
+                  onTap: _clearAllotApply,
+                  behavior: HitTestBehavior.opaque,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Container(
+                      width: 18,
+                      height: 18,
+                      decoration:
+                          const BoxDecoration(color: Color(0xFFC9CDD4), shape: BoxShape.circle),
+                      child: const Icon(Icons.close, size: 12, color: Colors.white),
+                    ),
+                  ),
+                )
+              : null),
       const Divider(height: 1, color: Color(0xFFF3F4F6)),
       SelectFieldItem(
           label: '调出时间',
@@ -2495,7 +2752,8 @@ class _AllotDeliveryEditPageState extends State<AllotDeliveryEditPage>
   static Widget _buildReadonlyField({required String label, required String value}) {
     return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Row(children: [
+        // 右侧文字过长换行时，标签与右侧文字第一行对齐（顶部对齐），不做整体垂直居中
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           SizedBox(
               // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
               width: 107,
@@ -2655,6 +2913,11 @@ class _DetailItemState extends State<_DetailItem> {
       final batchno = result['batchno']?.toString() ?? '';
       widget.row.batchController.text = batchno;
       widget.row.batchno = batchno;
+      // 对齐 Vue proDetails：切换单位后回填最新商品名称（列表与提交均取该名称）
+      final newName = result['productname']?.toString() ?? '';
+      if (newName.isNotEmpty) {
+        widget.row.nameController.text = newName;
+      }
       if (raw != null) {
         raw['qty'] = newQty;
         raw['price'] = newPrice;
@@ -2666,10 +2929,16 @@ class _DetailItemState extends State<_DetailItem> {
         raw['batch'] = batchno;
         raw['birthdate'] = result['birthdate']?.toString() ?? '';
         raw['validdate'] = result['validdate']?.toString() ?? '';
+        if (newName.isNotEmpty) {
+          raw['productname'] = newName;
+          raw['name'] = newName;
+        }
         raw['unit'] = result['unit']?.toString() ?? '';
         raw['size'] = result['size']?.toString() ?? '';
         raw['unitonlyid'] = result['unitonlyid']?.toString() ?? '';
         raw['sizeonlyid'] = result['sizeonlyid']?.toString() ?? '';
+        // 切换单位后同步商品名称：行数据与列表名称输入框
+        applyProductName(raw, result, nameController: widget.row.nameController);
         raw['remark'] = result['remark']?.toString() ?? '';
       }
       widget.onChanged?.call();
@@ -2702,39 +2971,40 @@ class _DetailItemState extends State<_DetailItem> {
         widget.row.amt != null ? widget.row.amt!.toStringAsFixed(2) : widget.row.amtController.text;
 
     return RepaintBoundary(
-      child: Container(
-        decoration: BoxDecoration(
-          color: widget.index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
-        ),
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (widget.isSelectMode) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: Checkbox(
-                        value: widget.isSelected,
-                        activeColor: const Color(0xFF006EFF),
-                        onChanged: (_) => widget.onToggle(),
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: GestureDetector(
+        // 整卡可点击：点击任意区域弹出商品详情（选择模式下复选框仍独立响应）
+        onTap: widget.readOnly ? null : _editDetail,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          decoration: BoxDecoration(
+            color: widget.index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
+          ),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (widget.isSelectMode) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: Checkbox(
+                          value: widget.isSelected,
+                          activeColor: const Color(0xFF006EFF),
+                          onChanged: (_) => widget.onToggle(),
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                // 列1: 商品名称（点击弹商品详情弹窗）
-                Expanded(
-                  flex: 6,
-                  child: GestureDetector(
-                    onTap: widget.readOnly ? null : _editDetail,
-                    behavior: HitTestBehavior.opaque,
+                    const SizedBox(width: 8),
+                  ],
+                  // 列1: 商品名称
+                  Expanded(
+                    flex: 6,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -2753,38 +3023,38 @@ class _DetailItemState extends State<_DetailItem> {
                       ],
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                // 列2: 数量（右对齐）
+                  const SizedBox(width: 8),
+                  // 列2: 数量（右对齐）
+                  Expanded(
+                    flex: 4,
+                    child: Text('数量：$qtyText',
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                        textAlign: TextAlign.right),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(children: [
                 Expanded(
-                  flex: 4,
-                  child: Text('数量：$qtyText',
-                      style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                  flex: 5,
+                  child: Text('调拨价：¥$priceText',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                ),
+                Expanded(
+                  flex: 5,
+                  child: Text('出库金额：$amtText',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                       textAlign: TextAlign.right),
                 ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(children: [
-              Expanded(
-                flex: 6,
-                child: Text('配送价：¥$priceText',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-              ),
-              Expanded(
-                flex: 4,
-                child: Text('金额：$amtText',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-                    textAlign: TextAlign.right),
-              ),
-            ]),
-            if (batchno.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text('批次：$batchno',
-                    style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF))),
-              ),
-          ],
+              ]),
+              if (batchno.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text('批次：$batchno',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF))),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -2923,7 +3193,13 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
         data['psprice']?.toString() ??
         data['lspsprice']?.toString() ??
         '';
-    final String shelves = data['shelves']?.toString() ?? '';
+    // 调出机构库存（后台口径：调拨出库单仅可查看调出门店库存）
+    final String outstockQtyRaw = data['outstockqty']?.toString() ??
+        data['stockoutqty']?.toString() ??
+        data['stockqty']?.toString() ??
+        data['stock']?.toString() ??
+        '';
+    final String outstockQty = outstockQtyRaw.isNotEmpty ? outstockQtyRaw : '0';
 
     return ConstrainedBox(
       constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
@@ -2978,6 +3254,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                   children: [
                     // 商品信息卡片
                     Container(
+                      // 撑满弹窗可用宽度（父级 Column 为 start 对齐，需显式拉伸）
+                      width: double.infinity,
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: const Color(0xFFF9FAFB),
@@ -2989,28 +3267,31 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                         children: [
                           _buildInfoLine('商品名称', name),
                           const SizedBox(height: 6),
-                          Text('条码：${barcode.isNotEmpty ? barcode : '-'}',
-                              style: const TextStyle(
-                                  fontSize: 12, color: Color(0xFF6B7280), height: 1.5)),
-                          const SizedBox(height: 4),
+                          // 条码与调拨价同行：条码占左侧、调拨价靠右（对齐小程序商品详情）
                           Row(
                             children: [
                               Expanded(
-                                child: Text('配送价：${psprice.isNotEmpty ? psprice : '-'}',
+                                child: Text('条码：${barcode.isNotEmpty ? barcode : '-'}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                         fontSize: 12, color: Color(0xFF6B7280), height: 1.5)),
                               ),
-                              Expanded(
-                                child: Text('货架号：$shelves',
-                                    style: const TextStyle(
-                                        fontSize: 12, color: Color(0xFF6B7280), height: 1.5)),
-                              ),
+                              const SizedBox(width: 12),
+                              Text('调拨价：${psprice.isNotEmpty ? psprice : '-'}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Color(0xFF6B7280), height: 1.5)),
                             ],
                           ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 12),
+                    // 调出机构库存（后台口径：调拨出库单可查看调出门店库存）
+                    _buildInfoRow('调出机构库存', outstockQty),
+                    _buildDivider(),
                     // 单位
                     _buildUnitSelectField(),
                     _buildDivider(),
@@ -3020,8 +3301,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                     // 数量（加减按钮 + 可编辑小数输入，对齐采购计划小数位处理）
                     _buildQtyStepper(),
                     _buildDivider(),
-                    // 配送金额（只读，= 配送价 × 数量，随输入实时重算）
-                    _buildInfoRow('配送金额', MathUtils.formatDecimal(3, _amt)),
+                    // 出库金额（只读，= 调拨价 × 数量，随输入实时重算）
+                    _buildInfoRow('出库金额', MathUtils.formatDecimal(3, _amt)),
                     _buildDivider(),
                     // 商品批次（SelectBatchSheet 选择，带出日期）
                     _buildBatchSelectField(),
@@ -3082,10 +3363,14 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                           'birthdate': _birthdateCtrl.text.trim(),
                           'validdate': _validdateCtrl.text.trim(),
                           'remark': _remarkCtrl.text.trim(),
+                          // 切换单位/规格后的商品名称（对齐 Vue proDetails 回传商品名）
+                          'productname': widget.productData['productname']?.toString() ?? '',
                           'unit': _currentUnit,
                           'size': _currentSize,
                           'unitonlyid': _unitonlyid,
                           'sizeonlyid': _sizeonlyid,
+                          // 切换单位后的商品名称随弹窗返回，供列表回写
+                          ...unitNameFields(widget.productData),
                         });
                       },
                       style: ElevatedButton.styleFrom(
@@ -3663,10 +3948,21 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
       final shelves = r['shelves']?.toString() ?? '';
       if (shelves.isNotEmpty) widget.productData['shelves'] = shelves;
       if (type == 'unit') {
+        // 对齐 Vue proDetails.selectUnitFn：切换单位时同步商品名称
+        // 直接用接口回传的包装名称 packname；未回传时用接口回传的商品名称 name
+        final String packName = r['packname']?.toString() ?? '';
+        final String resName = r['name']?.toString() ?? '';
+        final String newProductName = packName.isNotEmpty ? packName : resName;
+        if (newProductName.isNotEmpty) {
+          widget.productData['productname'] = newProductName;
+          widget.productData['name'] = newProductName;
+        }
         final u = r['unit']?.toString() ?? r['_name']?.toString() ?? '';
         if (u.isNotEmpty) _currentUnit = u;
         final uid = r['unitonlyid']?.toString() ?? r['_id']?.toString() ?? '';
         if (uid.isNotEmpty) _unitonlyid = uid;
+        // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+        syncUnitProductName(widget.productData, r, unitonlyid: uid);
         // 对齐 Vue unitConfirm：unitonlyid 非空时 packagenum = 1
         widget.productData['packagenum'] =
             uid.isNotEmpty ? '1' : (r['packagenum']?.toString() ?? '1');
@@ -4005,10 +4301,11 @@ class _ZeroQtyDialogState extends State<_ZeroQtyDialog> {
                       child: Text('商品名称',
                           style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13))),
                   SizedBox(
-                      width: 64,
+                      width: 80,
                       child: Text('调出机构库存',
                           style: TextStyle(fontWeight: FontWeight.w500, fontSize: 12),
-                          textAlign: TextAlign.center)),
+                          textAlign: TextAlign.center,
+                          maxLines: 1)),
                   SizedBox(
                       width: 72,
                       child: Text('数量',
@@ -4118,10 +4415,11 @@ class _StockLessDialogState extends State<_StockLessDialog> {
                       child: Text('商品名称',
                           style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13))),
                   SizedBox(
-                      width: 64,
+                      width: 80,
                       child: Text('调出机构库存',
                           style: TextStyle(fontWeight: FontWeight.w500, fontSize: 12),
-                          textAlign: TextAlign.center)),
+                          textAlign: TextAlign.center,
+                          maxLines: 1)),
                   SizedBox(
                       width: 72,
                       child: Text('调拨数量',
@@ -4235,7 +4533,7 @@ class _QtyEditItemState extends State<_QtyEditItem> {
           ),
           // 调出机构库存（固定列宽，与表头对齐）
           SizedBox(
-            width: 64,
+            width: 80,
             child: Text(
               MathUtils.formatDecimal(1, stock),
               style: const TextStyle(fontSize: 12, color: Color(0xFFFF4D4F)),

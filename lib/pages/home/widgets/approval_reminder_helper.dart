@@ -13,6 +13,7 @@ import 'package:flutter_deer/pages/business/chain/returnapplication/list.dart';
 import 'package:flutter_deer/pages/business/chain/returndeliver/list.dart';
 import 'package:flutter_deer/pages/home/widgets/approval_reminder_dialog.dart';
 import 'package:flutter_deer/routers/routers.dart';
+import 'package:flutter_deer/util/review_nav_state.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:sp_util/sp_util.dart';
 
@@ -134,15 +135,20 @@ class ApprovalReminderHelper {
   }
 
   /// 根据 billtypeid 跳转到对应页面（对齐 Vue goDetail）
+  ///
+  /// 跳转前将 [ReviewNavState] 的初始审核状态置为"待审核"，
+  /// 使目标单据列表页默认停留在"待审核"Tab（仅本入口生效）
   static bool _navigateTo(BuildContext context, String billtypeid, String name) {
     final route = _routeMap[billtypeid];
     if (route != null) {
+      ReviewNavState.setPendingStatusIndex(ReviewNavState.statusIndexPendingReview);
       Routes.router.navigateTo(context, route, transition: TransitionType.cupertino);
       return true;
     }
     // 连锁模块等未注册 Fluro 路由的页面：直接构造页面跳转
     final pageBuilder = _pageMap[billtypeid];
     if (pageBuilder != null) {
+      ReviewNavState.setPendingStatusIndex(ReviewNavState.statusIndexPendingReview);
       Navigator.of(context).push(
         MaterialPageRoute<void>(builder: (_) => pageBuilder()),
       );

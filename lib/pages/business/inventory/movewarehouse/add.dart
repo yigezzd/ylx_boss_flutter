@@ -9,6 +9,7 @@ import 'package:flutter_deer/components/select/select_batch.dart';
 import 'package:flutter_deer/components/select/select_buyer.dart';
 import 'package:flutter_deer/components/select/select_product.dart';
 import 'package:flutter_deer/components/select/select_store.dart';
+import 'package:flutter_deer/components/select/select_unit_size.dart';
 import 'package:flutter_deer/components/select/select_warehouse.dart';
 import 'package:flutter_deer/models/scan_settings.dart';
 import 'package:flutter_deer/net/http_api.dart';
@@ -20,11 +21,13 @@ import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/scan_match_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 enum _MwAction { none, save, sign, delete, print, withdraw }
@@ -72,6 +75,9 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
   String _userid = '';
   bool _isSelectMode = false;
   Set<int> _selectedIndices = {};
+
+  /// 未保存修改比对基线（进入页面/加载完成/保存完成后更新）
+  String _formSnapshot = '';
 
   bool get _isEdit => _billData != null && (_billData!['billid']?.toString().isNotEmpty ?? false);
   bool get _isSigned => _billData?['signflag']?.toString() == '1';
@@ -133,6 +139,8 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
     } else {
       _loadDefaults();
     }
+    // 新增模式：默认值回填后建立基线，未改动直接返回不弹窗
+    _refreshSnapshot();
     logEnter();
   }
 
@@ -186,6 +194,8 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
   }
 
@@ -274,7 +284,62 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
     _computeAmts(d);
   }
 
-  void _save({bool doSign = false}) {
+  // ═══ 返回与未保存修改检测 ═══
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _bsid,
+      _outcounterid,
+      _incounterid,
+      _handlerid,
+      _remarkCtrl.text,
+      jsonEncode(_fileLists),
+      jsonEncode(_detailList
+          .map((e) => {
+                'prodid': e['prodid']?.toString() ?? '',
+                'unit': e['unit']?.toString() ?? '',
+                'size': e['size']?.toString() ?? '',
+                'qty': e['qty']?.toString() ?? '',
+                'outcostprice': e['outcostprice']?.toString() ?? '',
+                'incostprice': e['incostprice']?.toString() ?? '',
+                'saleprice': e['saleprice']?.toString() ?? '',
+                'batchno': e['batchno']?.toString() ?? '',
+                'birthdate': e['birthdate']?.toString() ?? '',
+                'validdate': e['validdate']?.toString() ?? '',
+              })
+          .toList()),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/待审核（signflag 0）单据；
+  /// 已审核(1)/已驳回(2) 为只读或撤回态，无保存入口，直接放行
+  bool get _guardEnabled => (_billData?['signflag']?.toString() ?? '0') == '0';
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      _save(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
+  void _save({bool doSign = false, bool popAfterSave = false}) {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('014103', showTip: false)) {
         Toast.show('你无权编辑移仓单，请在后台修改权限');
@@ -353,11 +418,15 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
       }
       if (!doSign) {
         Toast.show('保存成功');
+        // 保存成功后重建基线，避免返回时重复提示
+        _refreshSnapshot();
       } else if (data is Map<String, dynamic>) {
         _doSignAfterSave(data);
       } else {
         _sign();
       }
+      // 返回拦截中选择「保存」：保存成功后直接返回上一页
+      if (popAfterSave && !doSign && mounted) Navigator.pop(context, true);
     }).whenComplete(() {
       if (mounted && !doSign) setState(() => _submitAction = _MwAction.none);
     });
@@ -1142,7 +1211,7 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
   @override
   Widget build(BuildContext context) {
     final disabled = _isSigned;
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
           backgroundColor: Colors.white,
@@ -1152,7 +1221,7 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
           leadingWidth: 40,
           leading: IconButton(
               icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-              onPressed: () => Navigator.pop(context)),
+              onPressed: _onBackPressed),
           title: Text(_isEdit ? '修改移仓单' : '新增移仓单',
               style: const TextStyle(
                   fontSize: 17, fontWeight: FontWeight.w600, color: Color(0xFF111827)))),
@@ -1202,7 +1271,8 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
                                                       fontSize: 12, color: Color(0xFF7A7A7A))),
                                             ])))),
                           // ---- 审核日志卡片（多级审批） ----
-                          if (_isEdit && (_reviewFlowUsers.isNotEmpty || _reviewBillFlows.isNotEmpty))
+                          if (_isEdit &&
+                              (_reviewFlowUsers.isNotEmpty || _reviewBillFlows.isNotEmpty))
                             SliverToBoxAdapter(
                                 child: Padding(
                                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
@@ -1337,42 +1407,44 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
                             (_bolHandleTT || (_reviewFlowUsers.isNotEmpty && _bolHandleT))) ...[
                           const SizedBox(width: 10),
                           Expanded(
-                            child: GestureDetector(
-                                onTap: _submitAction != _MwAction.none ? null : () => _save(),
-                                child: Container(
-                                    height: 42,
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF006EFF),
-                                        borderRadius: BorderRadius.circular(6)),
-                                    alignment: Alignment.center,
-                                    child: _submitAction == _MwAction.save
-                                        ? const SizedBox(
-                                            width: 20,
-                                            height: 20,
-                                            child: CircularProgressIndicator(
-                                                strokeWidth: 2, color: Colors.white))
-                                        : const Text('保存',
-                                            style: TextStyle(fontSize: 15, color: Colors.white))))),
-                        const SizedBox(width: 10),
-                        Expanded(
-                            child: GestureDetector(
-                                onTap: _submitAction != _MwAction.none
-                                    ? null
-                                    : () => _save(doSign: true),
-                                child: Container(
-                                    height: 42,
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF00A870),
-                                        borderRadius: BorderRadius.circular(6)),
-                                    alignment: Alignment.center,
-                                    child: _submitAction == _MwAction.sign
-                                        ? const SizedBox(
-                                            width: 20,
-                                            height: 20,
-                                            child: CircularProgressIndicator(
-                                                strokeWidth: 2, color: Colors.white))
-                                        : const Text('审核',
-                                            style: TextStyle(fontSize: 15, color: Colors.white))))),
+                              child: GestureDetector(
+                                  onTap: _submitAction != _MwAction.none ? null : () => _save(),
+                                  child: Container(
+                                      height: 42,
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFF006EFF),
+                                          borderRadius: BorderRadius.circular(6)),
+                                      alignment: Alignment.center,
+                                      child: _submitAction == _MwAction.save
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                  strokeWidth: 2, color: Colors.white))
+                                          : const Text('保存',
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
+                          const SizedBox(width: 10),
+                          Expanded(
+                              child: GestureDetector(
+                                  onTap: _submitAction != _MwAction.none
+                                      ? null
+                                      : () => _save(doSign: true),
+                                  child: Container(
+                                      height: 42,
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFF00A870),
+                                          borderRadius: BorderRadius.circular(6)),
+                                      alignment: Alignment.center,
+                                      child: _submitAction == _MwAction.sign
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                  strokeWidth: 2, color: Colors.white))
+                                          : const Text('审核',
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
                         ],
                         // 撤回按钮 - 仅已驳回状态(signflag==2)显示
                         if (_isRejected) ...[
@@ -1393,7 +1465,8 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
                                               child: CircularProgressIndicator(
                                                   strokeWidth: 2, color: Colors.white))
                                           : const Text('撤回',
-                                              style: TextStyle(fontSize: 15, color: Colors.white))))),
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
                         ],
                       ] else ...[
                         Expanded(
@@ -1434,12 +1507,20 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
                                               child: CircularProgressIndicator(
                                                   strokeWidth: 2, color: Colors.white))
                                           : const Text('审核',
-                                              style: TextStyle(fontSize: 15, color: Colors.white))))),
+                                              style:
+                                                  TextStyle(fontSize: 15, color: Colors.white))))),
                         ],
                       ],
                     ]),
                   ]),
             ),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1533,21 +1614,17 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
         behavior: HitTestBehavior.opaque,
         child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
+            child: Row(children: [
               // 星号固定占位，文字始终从同一起点对齐
               SizedBox(
                 width: 8,
                 child: required
-                    ? const Text('*',
-                        style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A)))
+                    ? const Text('*', style: TextStyle(fontSize: 14, color: Color(0xFFD54B5A)))
                     : null,
               ),
               SizedBox(
                 width: 64,
-                child: Text(label,
-                    style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
+                child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -1690,6 +1767,28 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
     );
   }
 
+  /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入）
+  bool get _showScanInput => !_isSigned && _scanSettings.showInfraredInput;
+
+  /// 明细编辑弹窗确认关闭后焦点“落空”时，将焦点恢复到红外扫描框，支持连续扫码；
+  /// 焦点已落到其他输入框（用户主动点按）时不干预；弹窗收尾动画中最多重试 30 帧再评估
+  void _returnFocusToScanIfIdle([int retryFrame = 0]) {
+    if (!_showScanInput) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanInput) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点；收尾动画中重试等待
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        if (retryFrame < 30) _returnFocusToScanIfIdle(retryFrame + 1);
+        return;
+      }
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
+  }
+
   void _showProductDetail(Map<String, dynamic> item, int index) {
     final disabled = _isSigned;
     final name = item['productname']?.toString() ?? item['name']?.toString() ?? '';
@@ -1825,6 +1924,45 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
       );
 
       if (opt == null) return;
+
+      // 切换单位/规格后按移出/移入仓库重取成本价与库存
+      // （对齐 zmProMax moveWarehouse unitConfirm/changeSize → getUnitPrice → stockproduct/getBacthList）
+      final batchList = await SelectUnitSizeSheet.fetchBatchStock(
+        productid: productid,
+        bsid: _bsid ?? '',
+        batchno: item['batchno']?.toString() ?? '',
+        outcounterid: _outcounterid ?? '',
+        incounterid: _incounterid ?? '',
+        unitonlyid:
+            type == 'unit' ? (opt['unitonlyid']?.toString() ?? opt['_id']?.toString() ?? '') : null,
+        sizeonlyid:
+            type == 'size' ? (opt['sizeonlyid']?.toString() ?? opt['_id']?.toString() ?? '') : null,
+      );
+      // 有批次：取批次移出/移入成本价与移出/移入库存；
+      // 无批次：回退 in/outemptycostprice、in/outemptybatchstockqty，再回退原值
+      final String newInCostprice;
+      final String newOutCostprice;
+      final String newOldInqty;
+      final String newOldOutqty;
+      if (batchList.isNotEmpty) {
+        final first = batchList.first;
+        newInCostprice =
+            MathUtils.formatDecimal(2, first['incostprice'] ?? first['costprice'] ?? 0);
+        newOutCostprice =
+            MathUtils.formatDecimal(2, first['outcostprice'] ?? first['costprice'] ?? 0);
+        newOldInqty = MathUtils.formatDecimal(2, first['instockqty'] ?? first['stockqty'] ?? 0);
+        newOldOutqty = MathUtils.formatDecimal(2, first['outstockqty'] ?? first['stockqty'] ?? 0);
+      } else {
+        newInCostprice = MathUtils.formatDecimal(
+            2, opt['inemptycostprice'] ?? opt['costprice'] ?? item['costprice'] ?? 0);
+        newOutCostprice = MathUtils.formatDecimal(
+            2, opt['outemptycostprice'] ?? opt['costprice'] ?? item['costprice'] ?? 0);
+        newOldInqty = MathUtils.formatDecimal(
+            2, opt['inemptybatchstockqty'] ?? opt['stockqty'] ?? item['stockqty'] ?? 0);
+        newOldOutqty = MathUtils.formatDecimal(
+            2, opt['outemptybatchstockqty'] ?? opt['stockqty'] ?? item['stockqty'] ?? 0);
+      }
+
       setDialogState(() {
         if (type == 'unit') {
           final u = opt['unit']?.toString() ?? opt['_name']?.toString() ?? '';
@@ -1832,6 +1970,8 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
           final uid = opt['unitonlyid']?.toString() ?? opt['_id']?.toString() ?? '';
           unitonlyid = uid;
           item['unitonlyid'] = uid;
+          // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+          syncUnitProductName(item, opt, unitonlyid: uid);
           if (uid.isNotEmpty) {
             size = item['_mainSize']?.toString() ?? size;
             sizeonlyid = item['_mainSizeonlyid']?.toString() ?? '';
@@ -1853,17 +1993,14 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
             item['saleprice'] = nr;
             item['sellprice'] = nr;
           }
-          final ns = opt['stockqty']?.toString() ?? opt['stock']?.toString();
-          if (ns != null && ns.isNotEmpty) {
-            item['stockqty'] = ns;
-            editStockqty = ns;
-            item['stock'] = ns;
-          }
-          final ncost = opt['costprice']?.toString();
-          if (ncost != null && ncost.isNotEmpty) {
-            costprice = double.tryParse(ncost) ?? 0;
-            item['costprice'] = ncost;
-          }
+          // 移出/移入成本价与批次库存统一按批次结果更新（对齐 zmProMax unitConfirm/changeSize）
+          item['incostprice'] = newInCostprice;
+          item['outcostprice'] = newOutCostprice;
+          item['oldinqty'] = newOldInqty;
+          item['oldoutqty'] = newOldOutqty;
+          editStockqty = newOldOutqty;
+          item['stockqty'] = newOldOutqty;
+          item['stock'] = newOldOutqty;
           final nsh = opt['shelves']?.toString();
           if (nsh != null && nsh.isNotEmpty) {
             shelves = nsh;
@@ -1894,17 +2031,14 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
             item['saleprice'] = nr;
             item['sellprice'] = nr;
           }
-          final ns = opt['stockqty']?.toString() ?? opt['stock']?.toString();
-          if (ns != null && ns.isNotEmpty) {
-            item['stockqty'] = ns;
-            editStockqty = ns;
-            item['stock'] = ns;
-          }
-          final ncost = opt['costprice']?.toString();
-          if (ncost != null && ncost.isNotEmpty) {
-            costprice = double.tryParse(ncost) ?? 0;
-            item['costprice'] = ncost;
-          }
+          // 移出/移入成本价与批次库存统一按批次结果更新（对齐 zmProMax unitConfirm/changeSize）
+          item['incostprice'] = newInCostprice;
+          item['outcostprice'] = newOutCostprice;
+          item['oldinqty'] = newOldInqty;
+          item['oldoutqty'] = newOldOutqty;
+          editStockqty = newOldOutqty;
+          item['stockqty'] = newOldOutqty;
+          item['stock'] = newOldOutqty;
         }
       });
     }
@@ -1913,296 +2047,314 @@ class _InventoryMovewarehouseAddPageState extends State<InventoryMovewarehouseAd
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
-          child: Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  margin: const EdgeInsets.only(top: 8, bottom: 4),
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFE5E7EB),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  child: Row(
-                    children: [
-                      // 左侧占位，平衡关闭按钮宽度，标题居中
-                      const SizedBox(width: 24),
-                      Expanded(
-                        child: const Text('商品详情',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.w600, color: Color(0xFF111827))),
-                      ),
-                      GestureDetector(
-                        onTap: () => Navigator.pop(ctx),
-                        child: const Icon(Icons.close, size: 20, color: Color(0xFF6B7280)),
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(height: 1, color: Color(0xFFE5E7EB)),
-                Flexible(
-                  child: SingleChildScrollView(
-                    padding: EdgeInsets.only(
-                      left: 16,
-                      right: 16,
-                      top: 12,
-                      bottom: MediaQuery.of(context).padding.bottom + 88,
+      builder: (ctx) => AnimatedPadding(
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+        // 键盘弹起时弹窗整体上移，避免输入框被键盘遮挡
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: StatefulBuilder(
+          builder: (ctx, setDialogState) => ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    margin: const EdgeInsets.only(top: 8, bottom: 4),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE5E7EB),
+                      borderRadius: BorderRadius.circular(2),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    child: Row(
                       children: [
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF9FAFB),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFFE5E7EB)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '商品名称：$name',
-                                style: const TextStyle(
-                                  fontSize: 15,
+                        // 左侧占位，平衡关闭按钮宽度，标题居中
+                        const SizedBox(width: 24),
+                        const Expanded(
+                          child: Text('商品详情',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  fontSize: 16,
                                   fontWeight: FontWeight.w600,
-                                  color: Color(0xFF111827),
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text('条码：$barcode',
-                                  style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
-                              const SizedBox(height: 4),
-                              Row(children: [
-                                Expanded(
-                                    child: Text('零售价：¥${MathUtils.formatDecimal(2, saleprice)}',
-                                        style: const TextStyle(
-                                            fontSize: 13, color: Color(0xFF6B7280)))),
-                                Expanded(
-                                    child: Text('货架号：$shelves',
-                                        style: const TextStyle(
-                                            fontSize: 13, color: Color(0xFF6B7280)))),
-                              ]),
-                            ],
-                          ),
+                                  color: Color(0xFF111827))),
                         ),
-                        const SizedBox(height: 12),
-                        if (!disabled &&
-                            (item['packageflag']?.toString() != '1' ||
-                                item['specflag']?.toString() == '1'))
-                          _buildDetailSelectField(
-                            label: '单位',
-                            value: unit.isNotEmpty ? unit : '请选择',
-                            onTap: () => handleUnitSpecSelect(ctx, setDialogState, 'unit', item),
-                          )
-                        else
-                          _buildDetailReadonlyField(
-                              label: '单位', value: unit.isNotEmpty ? unit : '-'),
-                        _buildDetailDivider(),
-                        if (!disabled &&
-                            item['specflag']?.toString() == '1' &&
-                            (item['unitonlyid'] == null ||
-                                (item['unitonlyid']?.toString().isEmpty ?? false)))
-                          _buildDetailSelectField(
-                            label: '规格',
-                            value: size.isNotEmpty ? size : '请选择',
-                            onTap: () => handleUnitSpecSelect(ctx, setDialogState, 'size', item),
-                          )
-                        else
-                          _buildDetailReadonlyField(
-                              label: '规格', value: size.isNotEmpty ? size : '-'),
-                        _buildDetailDivider(),
-                        if (disabled)
-                          _buildDetailReadonlyField(
-                              label: '移仓数量', value: editQty.toStringAsFixed(1))
-                        else
-                          _buildDetailFormField(
-                            label: '移仓数量',
-                            controller: qtyCtrl,
-                            focusNode: qtyFocus,
-                            isDecimal: true,
-                            onChanged: (v) {
-                              final val = double.tryParse(v) ?? 0;
-                              setDialogState(() => editQty = val);
-                            },
-                          ),
-                        _buildDetailDivider(),
-                        if (disabled)
-                          _buildDetailReadonlyField(
-                              label: '商品批次', value: editBatchno.isNotEmpty ? editBatchno : '-')
-                        else
-                          _buildDetailSelectField(
-                            label: '商品批次',
-                            value: editBatchno,
-                            onTap: () async {
-                              final productid =
-                                  item['productid']?.toString() ?? item['prodid']?.toString() ?? '';
-                              if (productid.isEmpty) {
-                                Toast.show('商品信息异常');
-                                return;
-                              }
-                              final result = await showModalBottomSheet<Map<String, dynamic>>(
-                                context: ctx,
-                                isScrollControlled: true,
-                                backgroundColor: Colors.transparent,
-                                builder: (_) => SelectBatchSheet(
-                                  productid: productid,
-                                  bsid: _bsid ?? '',
-                                  counterid: _outcounterid ?? '',
-                                  initialBatchNo: editBatchno,
-                                ),
-                              );
-                              if (result != null) {
-                                setDialogState(() {
-                                  editBatchno = result['batchno']?.toString() ?? '';
-                                  editBirthdate = _formatBatchDate(result['birthdate']);
-                                  final bd = editBirthdate.isNotEmpty ? editBirthdate : '';
-                                  editValiddate = _formatBatchDate(result['validdate']);
-                                  if (editValiddate.isEmpty && bd.isNotEmpty) {
-                                    editValiddate = bd;
-                                  }
-                                  editSupid = result['supid']?.toString() ?? '';
-                                  editSupname = result['supname']?.toString() ?? '';
-                                  // 同步更新批次对应的库存和成本价（对齐 lxAss batchHandle，无条件赋值）
-                                  editStockqty =
-                                      (double.tryParse(result['stockqty']?.toString() ?? '0') ?? 0)
-                                          .toStringAsFixed(1);
-                                  final batchCostprice =
-                                      double.tryParse(result['costprice']?.toString() ?? '0') ?? 0;
-                                  costprice = batchCostprice;
-                                });
-                              }
-                            },
-                          ),
-                        _buildDetailDivider(),
-                        if (disabled || editBatchno.isNotEmpty)
-                          _buildDetailReadonlyField(
-                              label: '生产日期', value: editBirthdate.isNotEmpty ? editBirthdate : '-')
-                        else
-                          _buildDetailDateField(
-                            label: '生产日期',
-                            value: editBirthdate,
-                            onTap: () async {
-                              final result = await _pickDetailDate(ctx, editBirthdate);
-                              if (result != null) {
-                                setDialogState(() => editBirthdate = result);
-                              }
-                            },
-                          ),
-                        _buildDetailDivider(),
-                        if (disabled || editBatchno.isNotEmpty)
-                          _buildDetailReadonlyField(
-                              label: '有效日期', value: editValiddate.isNotEmpty ? editValiddate : '-')
-                        else
-                          _buildDetailDateField(
-                            label: '有效日期',
-                            value: editValiddate,
-                            onTap: () async {
-                              final result = await _pickDetailDate(ctx, editValiddate);
-                              if (result != null) {
-                                setDialogState(() => editValiddate = result);
-                              }
-                            },
-                          ),
-                        _buildDetailDivider(),
-                        if (disabled)
-                          _buildDetailReadonlyField(label: '备注', value: editRemark)
-                        else
-                          _buildDetailFormField(
-                            label: '备注',
-                            controller: remarkCtrl,
-                            keyboardType: TextInputType.text,
-                            onChanged: (v) {
-                              setDialogState(() => editRemark = v);
-                            },
-                          ),
+                        GestureDetector(
+                          onTap: () => Navigator.pop(ctx),
+                          child: const Icon(Icons.close, size: 20, color: Color(0xFF6B7280)),
+                        ),
                       ],
                     ),
                   ),
-                ),
-                Container(
-                  padding: EdgeInsets.only(
-                    left: 16,
-                    right: 16,
-                    top: 10,
-                    bottom: MediaQuery.of(context).padding.bottom + 12,
-                  ),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: () => Navigator.pop(ctx),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFF6B7280),
-                            side: const BorderSide(color: Color(0xFFE5E7EB)),
-                            padding: const EdgeInsets.symmetric(vertical: 13),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          ),
-                          child: const Text('取消', style: TextStyle(fontSize: 15)),
-                        ),
+                  const Divider(height: 1, color: Color(0xFFE5E7EB)),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      padding: EdgeInsets.only(
+                        left: 16,
+                        right: 16,
+                        top: 12,
+                        bottom: MediaQuery.of(context).padding.bottom + 88,
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: ElevatedButton(
-                          onPressed: disabled
-                              ? () => Navigator.pop(ctx)
-                              : () {
-                                  setState(() {
-                                    _detailList[index]['qty'] = editQty;
-                                    _detailList[index]['unit'] = unit;
-                                    _detailList[index]['size'] = size;
-                                    _detailList[index]['unitonlyid'] = unitonlyid;
-                                    _detailList[index]['sizeonlyid'] = sizeonlyid;
-                                    _detailList[index]['batchno'] = editBatchno;
-                                    _detailList[index]['birthdate'] = editBirthdate;
-                                    _detailList[index]['validdate'] = editValiddate;
-                                    _detailList[index]['supid'] = editSupid;
-                                    _detailList[index]['supname'] = editSupname;
-                                    _detailList[index]['remark'] = editRemark;
-                                    _detailList[index]['barcode'] = barcode;
-                                    _detailList[index]['code'] = item['code']?.toString() ?? '';
-                                    _detailList[index]['stockqty'] = editStockqty;
-                                    _detailList[index]['saleprice'] = saleprice.toStringAsFixed(2);
-                                    _detailList[index]['sellprice'] = saleprice.toStringAsFixed(2);
-                                    _detailList[index]['shelves'] = shelves;
-                                    _detailList[index]['costprice'] = costprice.toStringAsFixed(3);
-                                    _writeData('qty', _detailList[index]);
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF9FAFB),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: const Color(0xFFE5E7EB)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '商品名称：$name',
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF111827),
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text('条码：$barcode',
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
+                                const SizedBox(height: 4),
+                                Row(children: [
+                                  Expanded(
+                                      child: Text('零售价：¥${MathUtils.formatDecimal(2, saleprice)}',
+                                          style: const TextStyle(
+                                              fontSize: 13, color: Color(0xFF6B7280)))),
+                                  Expanded(
+                                      child: Text('货架号：$shelves',
+                                          style: const TextStyle(
+                                              fontSize: 13, color: Color(0xFF6B7280)))),
+                                ]),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          if (!disabled &&
+                              (item['packageflag']?.toString() != '1' ||
+                                  item['specflag']?.toString() == '1'))
+                            _buildDetailSelectField(
+                              label: '单位',
+                              value: unit.isNotEmpty ? unit : '请选择',
+                              onTap: () => handleUnitSpecSelect(ctx, setDialogState, 'unit', item),
+                            )
+                          else
+                            _buildDetailReadonlyField(
+                                label: '单位', value: unit.isNotEmpty ? unit : '-'),
+                          _buildDetailDivider(),
+                          if (!disabled &&
+                              item['specflag']?.toString() == '1' &&
+                              (item['unitonlyid'] == null ||
+                                  (item['unitonlyid']?.toString().isEmpty ?? false)))
+                            _buildDetailSelectField(
+                              label: '规格',
+                              value: size.isNotEmpty ? size : '请选择',
+                              onTap: () => handleUnitSpecSelect(ctx, setDialogState, 'size', item),
+                            )
+                          else
+                            _buildDetailReadonlyField(
+                                label: '规格', value: size.isNotEmpty ? size : '-'),
+                          _buildDetailDivider(),
+                          if (disabled)
+                            _buildDetailReadonlyField(
+                                label: '移仓数量', value: editQty.toStringAsFixed(1))
+                          else
+                            _buildDetailFormField(
+                              label: '移仓数量',
+                              controller: qtyCtrl,
+                              focusNode: qtyFocus,
+                              isDecimal: true,
+                              onChanged: (v) {
+                                final val = double.tryParse(v) ?? 0;
+                                setDialogState(() => editQty = val);
+                              },
+                            ),
+                          _buildDetailDivider(),
+                          if (disabled)
+                            _buildDetailReadonlyField(
+                                label: '商品批次', value: editBatchno.isNotEmpty ? editBatchno : '-')
+                          else
+                            _buildDetailSelectField(
+                              label: '商品批次',
+                              value: editBatchno,
+                              onTap: () async {
+                                final productid = item['productid']?.toString() ??
+                                    item['prodid']?.toString() ??
+                                    '';
+                                if (productid.isEmpty) {
+                                  Toast.show('商品信息异常');
+                                  return;
+                                }
+                                final result = await showModalBottomSheet<Map<String, dynamic>>(
+                                  context: ctx,
+                                  isScrollControlled: true,
+                                  backgroundColor: Colors.transparent,
+                                  builder: (_) => SelectBatchSheet(
+                                    productid: productid,
+                                    bsid: _bsid ?? '',
+                                    counterid: _outcounterid ?? '',
+                                    initialBatchNo: editBatchno,
+                                  ),
+                                );
+                                if (result != null) {
+                                  setDialogState(() {
+                                    editBatchno = result['batchno']?.toString() ?? '';
+                                    editBirthdate = _formatBatchDate(result['birthdate']);
+                                    final bd = editBirthdate.isNotEmpty ? editBirthdate : '';
+                                    editValiddate = _formatBatchDate(result['validdate']);
+                                    if (editValiddate.isEmpty && bd.isNotEmpty) {
+                                      editValiddate = bd;
+                                    }
+                                    editSupid = result['supid']?.toString() ?? '';
+                                    editSupname = result['supname']?.toString() ?? '';
+                                    // 同步更新批次对应的库存和成本价（对齐 lxAss batchHandle，无条件赋值）
+                                    editStockqty =
+                                        (double.tryParse(result['stockqty']?.toString() ?? '0') ??
+                                                0)
+                                            .toStringAsFixed(1);
+                                    final batchCostprice =
+                                        double.tryParse(result['costprice']?.toString() ?? '0') ??
+                                            0;
+                                    costprice = batchCostprice;
                                   });
-                                  Navigator.pop(ctx);
-                                },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF006EFF),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 13),
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                          ),
-                          child: const Text('确定',
-                              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
-                        ),
+                                }
+                              },
+                            ),
+                          _buildDetailDivider(),
+                          if (disabled || editBatchno.isNotEmpty)
+                            _buildDetailReadonlyField(
+                                label: '生产日期',
+                                value: editBirthdate.isNotEmpty ? editBirthdate : '-')
+                          else
+                            _buildDetailDateField(
+                              label: '生产日期',
+                              value: editBirthdate,
+                              onTap: () async {
+                                final result = await _pickDetailDate(ctx, editBirthdate);
+                                if (result != null) {
+                                  setDialogState(() => editBirthdate = result);
+                                }
+                              },
+                            ),
+                          _buildDetailDivider(),
+                          if (disabled || editBatchno.isNotEmpty)
+                            _buildDetailReadonlyField(
+                                label: '有效日期',
+                                value: editValiddate.isNotEmpty ? editValiddate : '-')
+                          else
+                            _buildDetailDateField(
+                              label: '有效日期',
+                              value: editValiddate,
+                              onTap: () async {
+                                final result = await _pickDetailDate(ctx, editValiddate);
+                                if (result != null) {
+                                  setDialogState(() => editValiddate = result);
+                                }
+                              },
+                            ),
+                          _buildDetailDivider(),
+                          if (disabled)
+                            _buildDetailReadonlyField(label: '备注', value: editRemark)
+                          else
+                            _buildDetailFormField(
+                              label: '备注',
+                              controller: remarkCtrl,
+                              keyboardType: TextInputType.text,
+                              onChanged: (v) {
+                                setDialogState(() => editRemark = v);
+                              },
+                            ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                  Container(
+                    padding: EdgeInsets.only(
+                      left: 16,
+                      right: 16,
+                      top: 10,
+                      bottom: MediaQuery.of(context).padding.bottom + 12,
+                    ),
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFF6B7280),
+                              side: const BorderSide(color: Color(0xFFE5E7EB)),
+                              padding: const EdgeInsets.symmetric(vertical: 13),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: const Text('取消', style: TextStyle(fontSize: 15)),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: disabled
+                                ? () => Navigator.pop(ctx)
+                                : () {
+                                    setState(() {
+                                      _detailList[index]['qty'] = editQty;
+                                      _detailList[index]['unit'] = unit;
+                                      _detailList[index]['size'] = size;
+                                      _detailList[index]['unitonlyid'] = unitonlyid;
+                                      _detailList[index]['sizeonlyid'] = sizeonlyid;
+                                      _detailList[index]['batchno'] = editBatchno;
+                                      _detailList[index]['birthdate'] = editBirthdate;
+                                      _detailList[index]['validdate'] = editValiddate;
+                                      _detailList[index]['supid'] = editSupid;
+                                      _detailList[index]['supname'] = editSupname;
+                                      _detailList[index]['remark'] = editRemark;
+                                      _detailList[index]['barcode'] = barcode;
+                                      _detailList[index]['code'] = item['code']?.toString() ?? '';
+                                      _detailList[index]['stockqty'] = editStockqty;
+                                      _detailList[index]['saleprice'] =
+                                          saleprice.toStringAsFixed(2);
+                                      _detailList[index]['sellprice'] =
+                                          saleprice.toStringAsFixed(2);
+                                      _detailList[index]['shelves'] = shelves;
+                                      _detailList[index]['costprice'] =
+                                          costprice.toStringAsFixed(3);
+                                      _writeData('qty', _detailList[index]);
+                                    });
+                                    // 弹窗确认编辑后评估恢复扫描框焦点（连续扫码）
+                                    _returnFocusToScanIfIdle();
+                                    Navigator.pop(ctx);
+                                  },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF006EFF),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 13),
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            child: const Text('确定',
+                                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),

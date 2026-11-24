@@ -65,6 +65,8 @@ class SelectSupplierPage extends StatelessWidget {
         return {
           'supid': item['supid']?.toString() ?? '',
           'supname': displayName,
+          // 供应商编码单独返回，供调用方按「[编码]名称」自行拼装（如商品档案编辑回显）
+          'supcode': code,
           'name': name,
           'selltype': item['supselltype']?.toString() ?? '',
           'joinrate': item['joinrate']?.toString() ?? '',
@@ -90,6 +92,8 @@ class SelectSupplierPage extends StatelessWidget {
           final selected = {
             'supid': item['supid']?.toString() ?? '',
             'supname': displayName,
+            // 供应商编码单独返回，供调用方按「[编码]名称」自行拼装（如商品档案编辑回显）
+            'supcode': code,
             'name': name,
             'selltype': item['supselltype']?.toString() ?? '',
           };

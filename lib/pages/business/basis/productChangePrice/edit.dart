@@ -38,6 +38,9 @@ class _ChangePriceEditPageState extends State<ChangePriceEditPage> {
 
   late Map<String, dynamic> _productData;
   late final Map<String, TextEditingController> _controllers;
+
+  /// 价格输入框焦点（key → FocusNode）：聚焦时全选文本
+  late final Map<String, FocusNode> _focusNodes;
   bool _saving = false;
 
   /// 变更类型：6=单位变更，7=规格变更；null=未变更
@@ -79,14 +82,34 @@ class _ChangePriceEditPageState extends State<ChangePriceEditPage> {
       final original = _productData[key]?.toString() ?? '0';
       _controllers[key] = TextEditingController(text: MathUtils.formatDecimal(2, original));
     }
+    // 价格输入框聚焦时全选文本（参考采购入库单 _addOnFocusSelectAll）
+    _focusNodes = {};
+    for (final item in _allPriceItems) {
+      final key = item['key']!;
+      final node = FocusNode();
+      _focusNodes[key] = node;
+      _addOnFocusSelectAll(node, _controllers[key]!);
+    }
   }
 
   @override
   void dispose() {
+    for (final node in _focusNodes.values) {
+      node.dispose();
+    }
     for (final ctrl in _controllers.values) {
       ctrl.dispose();
     }
     super.dispose();
+  }
+
+  /// 聚焦后全选文本（参考采购入库单 _addOnFocusSelectAll），便于直接重输覆盖
+  void _addOnFocusSelectAll(FocusNode node, TextEditingController controller) {
+    node.addListener(() {
+      if (node.hasFocus && controller.text.isNotEmpty) {
+        controller.selection = TextSelection(baseOffset: 0, extentOffset: controller.text.length);
+      }
+    });
   }
 
   /// 同步所有价格输入框（单位/规格变更后调用）
@@ -427,6 +450,7 @@ class _ChangePriceEditPageState extends State<ChangePriceEditPage> {
               alignment: Alignment.centerLeft,
               child: TextField(
                 controller: ctrl,
+                focusNode: _focusNodes[key],
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
                 inputFormatters: [
                   FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
@@ -439,6 +463,12 @@ class _ChangePriceEditPageState extends State<ChangePriceEditPage> {
                   hintText: '0.00',
                   hintStyle: TextStyle(fontSize: 13, color: Color(0xFFD1D5DB)),
                 ),
+                onTap: () {
+                  // 点击聚焦时同样全选（代码聚焦场景由节点监听处理）
+                  if (ctrl.text.isNotEmpty) {
+                    ctrl.selection = TextSelection(baseOffset: 0, extentOffset: ctrl.text.length);
+                  }
+                },
                 onSubmitted: (_) => _onBlur(key),
                 onTapOutside: (_) => _onBlur(key),
               ),

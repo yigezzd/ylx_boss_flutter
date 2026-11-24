@@ -10,6 +10,7 @@ import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/date_range_picker.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 /// 门店结算单编辑页 —— 对齐 boss 项目 storePlierpayEdit.vue
@@ -33,6 +34,9 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
   Map<String, dynamic> _formData = {};
   List<Map<String, dynamic>> _detaillist = [];
   List<Map<String, dynamic>> _allBills = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   // ── 多级审批 ──
   List<Map<String, dynamic>> _reviewFlowUsers = [];
@@ -131,6 +135,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
       }
     } catch (_) {}
     if (_isEdit) _loadData();
+    _refreshSnapshot();
   }
 
   @override
@@ -217,6 +222,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
           _reviewFlowUsers = _parseReviewList(data['reviewFlowUsers']);
           _reviewBillFlows = _parseReviewList(data['reviewBillFlows']);
         });
+        _refreshSnapshot();
       }
     } catch (_) {
       if (mounted) Toast.show('加载失败');
@@ -227,7 +233,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
 
   // =================== 选择器 ===================
 
-  /// 应付门店（storetypes=[1,2], stopflag=0, 排除应收门店）
+  /// 应付门店（storetypes=[0,1,2,3,4], stopflag=0, 排除应收门店）
   Future<void> _selectStoreOut() async {
     final excludeId = _sid;
     final result = await CommonSelectSheet.show(
@@ -236,7 +242,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
       searchHint: '输入门店名称/编码',
       fetchData: (search, page) {
         final params = <String, dynamic>{
-          'storetypes': [1, 2],
+          'storetypes': [0, 1, 2, 3, 4],
           'stopflag': 0,
           'cond': search,
           'is_page': 1,
@@ -264,7 +270,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
     }
   }
 
-  /// 应收门店（storetypes=[0,3], psselecttype=2, sids=[bsid], nosidsflag=1, 排除应付门店）
+  /// 应收门店（storetypes=[0,1,2,3,4], psselecttype=2, sids=[bsid], nosidsflag=1, 排除应付门店）
   Future<void> _selectStoreIn() async {
     final currentBsid = _bsid;
     if (currentBsid.isEmpty) {
@@ -278,7 +284,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
       searchHint: '输入门店名称/编码',
       fetchData: (search, page) {
         final params = <String, dynamic>{
-          'storetypes': [0, 3],
+          'storetypes': [0, 1, 2, 3, 4],
           'sids': [currentBsid],
           'psselecttype': 2,
           'nosidsflag': 1,
@@ -830,9 +836,55 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
     obj['isort'] = index + 1;
   }
 
+  // =================== 返回与未保存修改检测 ===================
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _bsid,
+      _sid,
+      _handlerid,
+      _bankid,
+      _bankidother,
+      _payway,
+      _startdate,
+      _enddate,
+      _remarkCtl.text,
+      _payamtCtl.text,
+      _freeamtCtl.text,
+      _prepaidamtCtl.text,
+      _detaillist
+          .map((e) => '${e['sbillid']}_${e['payamt']}_${e['freeamt']}_${e['prepaidamt']}')
+          .join(','),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      await _handleSave(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
   // =================== 保存 / 审核 / 作废 / 删除 / 撤回 ===================
 
-  Future<void> _handleSave([int sign = 0]) async {
+  Future<void> _handleSave({int sign = 0, bool popAfterSave = false}) async {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('014603', showTip: false)) {
         Toast.show('你无权编辑门店结算，请在后台修改权限');
@@ -925,6 +977,10 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
         if (sign == 1) {
           _handleSignAfterSave(data is Map<String, dynamic> ? data : null, isWithdraw: isWithdraw);
         }
+        // 保存成功后刷新快照，避免返回时误报未保存
+        _refreshSnapshot();
+        // 返回时确认保存的场景：保存成功后返回上一页；普通保存仍留在当前页（对齐 Vue 行为）
+        if (popAfterSave && sign == 0 && mounted) Navigator.pop(context, true);
       }
     } catch (_) {
       if (mounted) Toast.show('保存失败');
@@ -1131,7 +1187,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
     );
     if (confirm != true) return;
     _formData['reviewsignflag'] = 2;
-    await _handleSave(1);
+    await _handleSave(sign: 1);
   }
 
   void _handlePrint() {
@@ -1186,7 +1242,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
       statusText = _isEdit ? '待审核' : '新增';
       statusColor = const Color(0xFFD54B5A);
     }
-    return Scaffold(
+    final Widget page = Scaffold(
       backgroundColor: const Color(0xFFF5F7FA),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1199,7 +1255,7 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
         leadingWidth: 40,
         leading: IconButton(
             icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-            onPressed: () => Navigator.pop(context, true)),
+            onPressed: _onBackPressed),
       ),
       body: Stack(children: [
         SingleChildScrollView(
@@ -1271,6 +1327,13 @@ class _StorePayEditPageState extends State<StorePayEditPage> {
         if (_loading || _billLoading) _loadingCard,
       ]),
       bottomNavigationBar: _buildBottomBar(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 

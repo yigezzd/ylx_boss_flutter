@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
@@ -90,6 +91,7 @@ class VersionCheckUtils {
       final params = <String, dynamic>{
         'appid': '10000',
         'clienttype': '9',
+        'platform': kIsWeb ? 'web' : defaultTargetPlatform.name.toLowerCase(),
         'vcode': vcode.replaceAll('.', ''),
         'machserial': machserial,
         'machserialnew': machserial,

@@ -21,6 +21,7 @@ import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:flutter_deer/widgets/voice_recognition_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
@@ -62,6 +63,9 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
 
   /// 附件列表
   List<Map<String, dynamic>> _fileLists = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   bool get _isEdit =>
       (_newBillid != null && _newBillid!.isNotEmpty) ||
@@ -157,6 +161,8 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
     } else {
       _loadNewModeDefaults();
     }
+    // 新增模式：同步默认值回填完成后建立基线，未改动直接返回不弹窗
+    _refreshSnapshot();
   }
 
   void _loadNewModeDefaults() {
@@ -264,10 +270,58 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
   }
 
-  void _submit({bool withSign = false}) {
+  // =================== 返回与未保存修改检测 ===================
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _storeid,
+      _buyerid,
+      _remarkController.text,
+      jsonEncode(_fileLists),
+      _items
+          .map((r) =>
+              '${r.prodid}_${r.nameController.text}_${r.qtyController.text}_${r.priceController.text}_${r.amtController.text}')
+          .join(','),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/未审核（signflag 0）单据；
+  /// 已审核(1)/驳回待处理(2) 为只读态，无保存入口，直接放行
+  bool get _guardEnabled {
+    final signflag = int.tryParse(_billData?['signflag']?.toString() ?? '0') ?? 0;
+    return signflag == 0;
+  }
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      _submit(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
+  void _submit({bool withSign = false, bool popAfterSave = false}) {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('012003', showTip: false)) {
         Toast.show('你无权编辑退货申请，请在后台修改权限');
@@ -335,6 +389,8 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
     request(HttpApi.cgzcSave, params).then((result) {
       if (!mounted) return;
       Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      // 保存成功后重建基线，避免后续跳转/停留被误判为未保存
+      _refreshSnapshot();
       final retData = result['data'];
       if (retData is Map<String, dynamic>) {
         if (_isEdit) {
@@ -352,6 +408,7 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
           }
         }
         if (withSign) _doSignAfterSave(retData);
+        if (popAfterSave && !withSign && mounted) Navigator.pop(context, true);
       } else {
         if (!_isEdit) Navigator.pop(context, true);
       }
@@ -846,6 +903,7 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
   }
 
   Map<String, dynamic> _buildMergData() => {
+        'bzshowflag': 1,
         'stockflag': 1,
         'storeid': _storeid ?? '',
         'counterid': '',
@@ -857,7 +915,7 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final page = Scaffold(
         backgroundColor: const Color(0xFFF5F5F5),
         appBar: AppBar(
             backgroundColor: Colors.white,
@@ -867,7 +925,7 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
             leadingWidth: 40,
             leading: IconButton(
                 icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-                onPressed: () => Navigator.pop(context)),
+                onPressed: _onBackPressed),
             title: Text(
                 _isEdit
                     ? (_isSigned ? '退货申请单详情' : (_isRejected ? '退货申请单详情' : '修改退货申请单'))
@@ -877,6 +935,13 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
         body: _detailLoading
             ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
             : _buildBody());
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
+    );
   }
 
   static const double _stickyScanHeight = 68.0;
@@ -915,13 +980,16 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
                   child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       child: _DetailItem(
+                          // 按行身份加 Key：避免扫码 insert(0) 列表错位后 State 复用导致失焦监听器与行错位
+                          key: ValueKey<_DetailRow>(_items[index]),
                           row: _items[index],
                           index: index,
                           isSelectMode: _isSelectMode,
                           isSelected: _selectedIndices.contains(index),
                           readOnly: _readOnly,
                           onToggle: () => _toggleIndex(index),
-                          onChanged: () => setState(() {}))))),
+                          onChanged: () => setState(() {}),
+                          onQtyBlur: _returnFocusToScanIfIdle)))),
         if (_items.isEmpty)
           const SliverToBoxAdapter(
               child: Padding(
@@ -1175,8 +1243,13 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
             required: true,
             value: _storeController.text,
             onTap: () async {
-              final r =
-                  await SelectStorePage.show(context, initialSelectedId: _storeid?.toString());
+              // 对齐 Vue cgthsq/edit.vue：登录门店 supflag==1 时才传 supflag（...(store.supflag == 1 ? { supflag: 1 } : {})）
+              final supflag = SelectStorePage.loginStoreField('supflag') == '1' ? '1' : null;
+              final r = await SelectStorePage.show(
+                context,
+                initialSelectedId: _storeid?.toString(),
+                supflag: supflag,
+              );
               if (r != null && mounted)
                 setState(() {
                   _storeid = int.tryParse(r['storeid']?.toString() ?? '');
@@ -1456,6 +1529,13 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
             final oq = double.tryParse(_items[ei].qtyController.text) ?? 0;
             final aq = double.tryParse(prod['qty']?.toString() ?? '1') ?? 1;
             _items[ei].qtyController.text = MathUtils.formatDecimal(1, oq + aq);
+            final row = _items[ei];
+            row.rawData ??= {};
+            for (final key in const ['batchno', 'birthdate', 'validdate', 'stockqty']) {
+              if (prod.containsKey(key)) {
+                row.rawData![key] = prod[key];
+              }
+            }
             _recalcRow(_items[ei]);
           } else {
             // 采购价优先，为空或为 0 时回退档案进价（对齐选择页取值规则）
@@ -1596,6 +1676,25 @@ class _CgthsqAddPageState extends State<CgthsqAddPage> {
       if (returnFocusNode != null && mounted) returnFocusNode.requestFocus();
     }).catchError((_) {
       if (mounted) Toast.show('查询商品失败');
+    });
+  }
+
+  /// 红外扫描框是否渲染（数量失焦后焦点恢复的判据，与扫描框渲染条件保持一致）
+  bool get _showScanBox => !_isSigned && _scanSettings.showInfraredInput;
+
+  /// 明细行数量失焦后焦点"落空"（收起键盘、点按非输入区域等）时，将焦点恢复到红外扫描框，
+  /// 支持连续扫码；焦点已落到其他输入框（用户主动点按单价/金额/其他行等）时不干预，避免打断手工编辑
+  void _returnFocusToScanIfIdle() {
+    if (!_showScanBox) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanBox) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
     });
   }
 
@@ -1823,13 +1922,15 @@ class _DetailRow {
 
 class _DetailItem extends StatefulWidget {
   const _DetailItem(
-      {required this.row,
+      {super.key,
+      required this.row,
       required this.index,
       required this.isSelectMode,
       required this.isSelected,
       required this.readOnly,
       required this.onToggle,
-      this.onChanged});
+      this.onChanged,
+      this.onQtyBlur});
   final _DetailRow row;
   final int index;
   final bool isSelectMode;
@@ -1839,6 +1940,9 @@ class _DetailItem extends StatefulWidget {
 
   /// 失焦回调：行金额格式化/重算完成后通知父页面刷新底部合计
   final VoidCallback? onChanged;
+
+  /// 数量失焦回调：父页面在焦点落空时将焦点恢复到扫描框
+  final VoidCallback? onQtyBlur;
   @override
   State<_DetailItem> createState() => _DetailItemState();
 }
@@ -1854,7 +1958,11 @@ class _DetailItemState extends State<_DetailItem> {
   void initState() {
     super.initState();
     _opb = () => _ff(widget.row.priceFocusNode, _pc, 2);
-    _oqb = () => _ff(widget.row.qtyFocusNode, _qc, 1);
+    _oqb = () {
+      _ff(widget.row.qtyFocusNode, _qc, 1);
+      // 数量失焦后通知父页面评估恢复扫描框焦点（连续扫码）
+      if (!widget.row.qtyFocusNode.hasFocus) widget.onQtyBlur?.call();
+    };
     _oab = () => _faf();
     widget.row.priceFocusNode.addListener(_opb);
     widget.row.qtyFocusNode.addListener(_oqb);

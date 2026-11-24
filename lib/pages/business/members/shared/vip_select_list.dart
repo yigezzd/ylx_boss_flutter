@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_deer/components/select/select_store.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
 import 'package:flutter_deer/pages/business/members/basic/add.dart';
+import 'package:flutter_deer/pages/business/members/vippay/vippay_record_router.dart';
 import 'package:flutter_deer/res/constant.dart';
+import 'package:flutter_deer/routers/fluro_navigator.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
@@ -21,12 +24,16 @@ import 'package:sp_util/sp_util.dart';
 /// - [selectMode] = true 时为“选择会员”模式（对齐 recharge/search.vue）：
 ///   点击会员直接 pop 返回该会员数据；
 /// - [showAdd] = true 时右上角显示新增按钮（对齐 recharge index.vue，权限 010702）。
+/// 顶部发行机构筛选对齐 members/index.vue：统一管理(vipflag=1)可选“自己/全部门店”，
+/// 独立管理固定当前机构且不可切换；“选择会员”模式（对齐 recharge/search.vue）不显示。
 class VipSelectListPage extends StatefulWidget {
   const VipSelectListPage({
     super.key,
     required this.title,
     this.selectMode = false,
     this.showAdd = false,
+    this.showRecord = false,
+    this.onRecordTap,
     this.buildEditPage,
     this.editRouteName = '',
   });
@@ -39,6 +46,12 @@ class VipSelectListPage extends StatefulWidget {
 
   /// 是否显示右上角新增按钮（会员开卡，权限 010702）
   final bool showAdd;
+
+  /// 是否显示右上角“收款记录”按钮（对齐 vippay/index.vue 收款记录入口）
+  final bool showRecord;
+
+  /// 点击“收款记录”的回调（未设置时使用默认路由跳转）
+  final VoidCallback? onRecordTap;
 
   /// 非选择模式下点击会员要打开的页面构建器
   final Widget Function(Map<String, dynamic> item)? buildEditPage;
@@ -61,9 +74,13 @@ class _VipSelectListPageState extends State<VipSelectListPage> {
   final TextEditingController _searchController = TextEditingController();
   Timer? _debounce;
 
-  // ── 默认机构（对齐 Vue getCookie("store") → issuesids）──
+  // ── 发行机构筛选（对齐 Vue getCookie("store") → issuesids / issuesidname）──
   String _storeId = '';
   String _storeName = '';
+
+  // 会员管理配置(vipflag)：统一管理=1（默认）发行机构可选"自己/全部门店"；
+  // 独立管理=3 固定当前机构（数据隔离，不可切换）
+  bool _isUnifyVip = true;
 
   @override
   void initState() {
@@ -88,6 +105,8 @@ class _VipSelectListPageState extends State<VipSelectListPage> {
         final Map<String, dynamic> storeMap = jsonDecode(storeStr) as Map<String, dynamic>;
         _storeId = storeMap['id']?.toString() ?? '';
         _storeName = storeMap['name']?.toString() ?? '';
+        // vipflag 缺失时兼容统一管理（对齐 Vue (store.vipflag ?? 1) == 1）
+        _isUnifyVip = (storeMap['vipflag']?.toString() ?? '1') == '1';
       }
     } catch (_) {}
   }
@@ -112,7 +131,8 @@ class _VipSelectListPageState extends State<VipSelectListPage> {
       'page': _page,
       'is_page': 1,
       'pagesize': 20,
-      'issuesids': _storeId.isNotEmpty ? [_storeId] : null,
+      // 选择"全部"时 storeid 为 0，对齐 Vue res.id ? [res.id] : null
+      'issuesids': _storeId.isNotEmpty && _storeId != '0' ? [_storeId] : null,
       'issuesidname': _storeName,
       'sharevipids': <String>[],
       'cardstatus': -1,
@@ -154,6 +174,27 @@ class _VipSelectListPageState extends State<VipSelectListPage> {
       _hasMore = true;
       _loadData();
     });
+  }
+
+  // ── 发行机构选择（对齐 Vue jumpPge → selectStore）──
+  Future<void> _selectStore() async {
+    // 独立管理门店：发行机构固定当前机构，禁止切换（数据隔离）
+    if (!_isUnifyVip) return;
+    final result = await SelectStorePage.show(
+      context,
+      showAll: _isUnifyVip,
+      initialSelectedId: _storeId,
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _storeId = result['storeid']?.toString() ?? '';
+        _storeName = result['storename']?.toString() ?? '';
+        _page = 1;
+        _list = [];
+        _hasMore = true;
+      });
+      _loadData();
+    }
   }
 
   /// 扫码搜索（对齐 Vue scanFn）
@@ -230,16 +271,51 @@ class _VipSelectListPageState extends State<VipSelectListPage> {
     );
   }
 
-  // ──────────── 顶部：搜索框 + 扫码 + 新增 ────────────
+  // ──────────── 顶部：发行机构 + 搜索框 + 扫码 + 新增 ────────────
   Widget _buildTopBar() {
     return Container(
       color: Colors.white,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         children: [
+          // 发行机构按钮（对齐 Vue store-btn）——独立管理时灰显、隐藏箭头且不可切换；"选择会员"模式不显示
+          if (!widget.selectMode)
+            GestureDetector(
+              onTap: _selectStore,
+              child: Container(
+                width: 115,
+                height: 40,
+                padding: EdgeInsets.only(left: 10, right: _isUnifyVip ? 8 : 10),
+                decoration: BoxDecoration(
+                  color: _isUnifyVip ? Colors.white : const Color(0xFFF5F5F5),
+                  border: Border.all(
+                    color: _isUnifyVip ? const Color(0xFFDEDEDE) : const Color(0xFFE5E5E5),
+                  ),
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _storeName.isNotEmpty ? _storeName : '演示门店',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: _isUnifyVip ? Colors.black : const Color(0xFF999999),
+                        ),
+                      ),
+                    ),
+                    if (_isUnifyVip)
+                      const Icon(Icons.arrow_drop_down, size: 20, color: Colors.black54),
+                  ],
+                ),
+              ),
+            ),
           Expanded(
             child: Container(
               height: 40,
+              margin: EdgeInsets.symmetric(horizontal: widget.selectMode ? 0 : 6),
               padding: const EdgeInsets.symmetric(horizontal: 10),
               decoration: BoxDecoration(
                 border: Border.all(color: const Color(0xFFDEDEDE)),
@@ -311,9 +387,38 @@ class _VipSelectListPageState extends State<VipSelectListPage> {
               ),
             ),
           ],
+          // 收款记录按钮（会员收款页显示，对齐 Vue vippay index.vue）
+          if (widget.showRecord) ...[
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: _openRecord,
+              child: Container(
+                height: 40,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  border: Border.all(color: const Color(0xFFDEDEDE)),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: const Text(
+                  '收款记录',
+                  style: TextStyle(fontSize: 13, color: Color(0xFF4293FF)),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  /// 收款记录入口（优先走外部回调，未设置时使用默认路由跳转）
+  void _openRecord() {
+    if (widget.onRecordTap != null) {
+      widget.onRecordTap!();
+      return;
+    }
+    NavigatorUtils.push(context, VippayRecordRouter.vippayRecord);
   }
 
   // ──────────── 列表 ────────────

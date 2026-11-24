@@ -8,8 +8,11 @@ import 'package:flutter_deer/pages/business/basis/productChangePrice/router.dart
 import 'package:flutter_deer/pages/business/basis/promotionPlan/router.dart';
 import 'package:flutter_deer/pages/business/basis/storeChangePrice/router.dart';
 import 'package:flutter_deer/pages/business/finance/router.dart';
+import 'package:flutter_deer/pages/business/fulfillment/picking/takeout_picking_detail.dart';
+import 'package:flutter_deer/pages/business/fulfillment/picking/takeout_picking_list.dart';
 import 'package:flutter_deer/pages/business/inventory/router.dart';
 import 'package:flutter_deer/pages/business/member/account_router.dart';
+import 'package:flutter_deer/pages/business/members/vippay/vippay_record_router.dart';
 import 'package:flutter_deer/pages/business/purchase/cgorder/router.dart';
 import 'package:flutter_deer/pages/business/purchase/cgother/router.dart';
 import 'package:flutter_deer/pages/business/purchase/cgothercd/router.dart';
@@ -21,6 +24,7 @@ import 'package:flutter_deer/pages/business/purchase/instore/router.dart';
 import 'package:flutter_deer/pages/business/purchase/supplier/router.dart';
 import 'package:flutter_deer/pages/business/wholesale/router.dart';
 import 'package:flutter_deer/pages/business/wms/launch/router.dart';
+import 'package:flutter_deer/pages/business/wms/location/router.dart';
 import 'package:flutter_deer/pages/business/wms/receive/router.dart';
 import 'package:flutter_deer/pages/business/wms/restock/router.dart';
 import 'package:flutter_deer/pages/business/wms/stockQuery/router.dart';
@@ -58,6 +62,8 @@ class Routes {
   static String webViewPage = '/webView';
   static String cardSetting = '/home/cardSetting';
   static String stockWarning = '/stockWarning';
+  static String takeoutPicking = '/fulfillment/takeout_picking';
+  static String takeoutPickingDetail = '/fulfillment/takeout_picking_detail';
 
   static final List<IRouterProvider> _listRouter = [];
 
@@ -86,6 +92,19 @@ class Routes {
             handlerFunc: (BuildContext? context, Map<String, List<String>> params) =>
                 const StockWarningPage()));
 
+    router.define(takeoutPicking,
+        handler: Handler(
+            handlerFunc: (BuildContext? context, Map<String, List<String>> params) =>
+                const TakeoutPickingListPage()));
+
+    router.define(takeoutPickingDetail,
+        handler: Handler(handlerFunc: (BuildContext? context, Map<String, List<String>> params) {
+      final dynamic args = context?.settings?.arguments;
+      final Map<String, dynamic> order =
+          args is Map<String, dynamic> ? args : const <String, dynamic>{};
+      return TakeoutPickingDetailPage(order: order);
+    }));
+
     router.define(webViewPage, handler: Handler(handlerFunc: (_, params) {
       final String title = params['title']?.first ?? '';
       final String url = params['url']?.first ?? '';
@@ -98,12 +117,13 @@ class Routes {
     /// 各自路由由各自模块管理，统一在此添加初始化
     _listRouter.add(LoginRouter());
     _listRouter.add(AccountRouter());
+    _listRouter.add(VippayRecordRouter());
     _listRouter.add(SettingRouter());
     _listRouter.add(PurchaseRouter());
     _listRouter.add(CgorderRouter());
     _listRouter.add(CgplanRouter());
     _listRouter.add(CgzcRouter());
-    _listRouter.add(CgthsqRouter()); 
+    _listRouter.add(CgthsqRouter());
     _listRouter.add(CgotherRouter());
     _listRouter.add(CgothercdRouter());
     _listRouter.add(CgthRouter());
@@ -122,6 +142,7 @@ class Routes {
     _listRouter.add(WmsLaunchRouter());
     _listRouter.add(WmsRestockRouter());
     _listRouter.add(WmsStockQueryRouter());
+    _listRouter.add(WmsLocationRouter());
     _listRouter.add(WmsSetRouter());
 
     _listRouter.add(CashFlowRouter());

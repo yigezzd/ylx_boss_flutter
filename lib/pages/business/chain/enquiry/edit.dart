@@ -15,12 +15,14 @@ import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 enum _EnqAction { none, save, sign, delete, retsign, print, withdraw, stop }
@@ -91,6 +93,9 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
   bool _scanFieldFocused = false;
   Timer? _scanDebounceTimer;
 
+  /// 手动输入条码模式：开启后弹出软键盘，按键盘搜索键/回车提交（扫描模式不弹键盘）
+  bool _scanManualMode = false;
+
   _EnqAction _submitAction = _EnqAction.none;
   bool _detailLoading = false;
 
@@ -108,6 +113,9 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
   Map<String, dynamic>? _billData;
   String? _newBillid;
   List<Map<String, dynamic>> _fileLists = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   bool get _isEdit =>
       (_newBillid != null && _newBillid!.isNotEmpty) ||
@@ -150,6 +158,21 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
 
   final List<_DetailRow> _items = [];
 
+  /// 明细列表滚动控制器（扫码录入后聚焦数量框时将顶部新行滚入可视区）
+  final ScrollController _scrollController = ScrollController();
+
+  /// 列表重建/删除后延迟一帧释放旧行：
+  /// 数量输入框/焦点节点在对应 TextField 卸载完成后再释放，避免重建期间访问已释放对象
+  void _disposeRowsAfterFrame(Iterable<_DetailRow> rows) {
+    final list = rows.toList();
+    if (list.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      for (final row in list) {
+        row.dispose();
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -159,13 +182,9 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         if (event is KeyDownEvent &&
             (event.logicalKey == LogicalKeyboardKey.enter ||
                 event.logicalKey == LogicalKeyboardKey.numpadEnter)) {
-          final scanCode = _scanController.text.trim();
-          if (scanCode.isNotEmpty) {
-            _scanDebounceTimer?.cancel();
-            _handleScannedBarcode(scanCode, returnFocusNode: _scanFocusNode);
-            _scanController.clear();
-            _scanFocusNode.requestFocus();
-            SystemChannels.textInput.invokeMethod('TextInput.hide');
+          // 扫码枪回车与软键盘搜索键共用同一提交逻辑
+          if (_scanController.text.trim().isNotEmpty) {
+            _submitScanCode();
           }
           return KeyEventResult.handled;
         }
@@ -175,7 +194,10 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     _scanFocusNode.addListener(() {
       if (_scanFocusNode.hasFocus && !_scanFieldFocused) {
         _scanFieldFocused = true;
-        SystemChannels.textInput.invokeMethod('TextInput.hide');
+        // 扫描模式聚焦时隐藏软键盘，避免遮挡页面；手动输入模式保留键盘
+        if (!_scanManualMode) {
+          SystemChannels.textInput.invokeMethod('TextInput.hide');
+        }
       } else if (!_scanFocusNode.hasFocus) {
         _scanFieldFocused = false;
       }
@@ -184,14 +206,12 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       _scanDebounceTimer?.cancel();
       final text = _scanController.text.trim();
       if (text.isEmpty) return;
+      // 手动输入模式：等待用户按键盘搜索键/回车提交，避免逐字输入时误触发查询
+      if (_scanManualMode) return;
       _scanDebounceTimer = Timer(const Duration(milliseconds: 150), () {
         if (!mounted) return;
-        final code = _scanController.text.trim();
-        if (code.isEmpty) return;
-        _handleScannedBarcode(code, returnFocusNode: _scanFocusNode);
-        _scanController.clear();
-        _scanFocusNode.requestFocus();
-        SystemChannels.textInput.invokeMethod('TextInput.hide');
+        if (_scanController.text.trim().isEmpty) return;
+        _submitScanCode();
       });
     });
     // 加载当前登录用户信息
@@ -247,6 +267,8 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       _loadDetail();
     } else {
       _loadNewModeDefaults();
+      // 新增模式：以默认值作为快照基准
+      _refreshSnapshot();
     }
     logEnter();
   }
@@ -267,6 +289,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     _remarkController.dispose();
     _scanController.dispose();
     _scanFocusNode.dispose();
+    _scrollController.dispose();
     for (final row in _items) {
       row.dispose();
     }
@@ -316,9 +339,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
 
           // 明细
           final list = data['detaillist'] as List? ?? [];
-          for (final row in _items) {
-            row.dispose();
-          }
+          _disposeRowsAfterFrame(_items);
           _items.clear();
           for (final v in list) {
             if (v is! Map) continue;
@@ -356,12 +377,61 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         }
       }
     }).whenComplete(() {
-      if (mounted) setState(() => _detailLoading = false);
+      if (mounted) {
+        setState(() => _detailLoading = false);
+        // 详情加载完成后刷新快照基准
+        _refreshSnapshot();
+      }
     });
   }
 
+  // =================== 返回与未保存修改检测 ===================
+  String _buildSnapshot() {
+    return [
+      _insid ?? '',
+      _outsid ?? '',
+      _outhandlerid ?? '',
+      _inhandlerid ?? '',
+      _validtimeController.text,
+      _remarkController.text,
+      _refcode,
+      _urgentflag.toString(),
+      '${_fileLists.length}:${_fileLists.map((e) => e['filename']?.toString() ?? '').join(',')}',
+      _items
+          .map((r) => [
+                r.prodid,
+                r.qtyController.text,
+                r.priceController.text,
+                r.amtController.text,
+              ].join('_'))
+          .join(','),
+    ].join('|');
+  }
+
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 确认保存：保存成功后返回上一页
+      _submit(popAfterSave: true);
+    } else if (result == false) {
+      // 不保存：直接返回上一页
+      if (mounted) Navigator.pop(context, true);
+    }
+    // result == null：点击遮罩取消，留在当前页
+  }
+
   // =================== 提交保存 ===================
-  void _submit({bool withSign = false}) {
+  void _submit({bool withSign = false, bool popAfterSave = false}) {
     if (!PermissionUtils.checkPermission('013003', showTip: false)) {
       Toast.show('你无权保存要货申请单，请在后台修改权限');
       return;
@@ -426,6 +496,11 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
           _parseReviewList(retData['reviewFlowUsers']).isNotEmpty;
       if (!enterApproval) {
         Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      }
+      // 返回时确认保存的场景：保存成功后直接返回上一页，不再重载详情
+      if (popAfterSave) {
+        Navigator.pop(context, true);
+        return;
       }
       if (retData is Map<String, dynamic>) {
         final isNew = !_isEdit;
@@ -753,9 +828,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
           built.add(row);
         }
         // 选择模板后整体替换现有商品列表（不保留/合并原明细）
-        for (final row in _items) {
-          row.dispose();
-        }
+        _disposeRowsAfterFrame(_items);
         _items.clear();
         _items.addAll(built);
       });
@@ -836,9 +909,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
   /// 选择页确认后整体回填明细（对齐 Vue onSelectProduct：选择页已选区含当前明细）
   void _applySelectedProducts(List<Map<String, dynamic>> result) {
     setState(() {
-      for (final row in _items) {
-        row.dispose();
-      }
+      _disposeRowsAfterFrame(_items);
       _items.clear();
       for (final prod in result) {
         final c = Map<String, dynamic>.from(prod);
@@ -862,16 +933,45 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
 
   /// 扫描条码命中多条商品时进入选择商品页（避免误取第一条），
   /// 用户挑选确认后焦点交还扫码输入框，便于 PDA 连续录入
-  Future<void> _pickFromMultiple(String code, {FocusNode? returnFocusNode}) async {
+  Future<void> _pickFromMultiple(String code,
+      {FocusNode? returnFocusNode, bool focusQty = false}) async {
     final result = await _openSelectProductPage(keyword: code);
     if (!mounted) return;
     if (result != null) {
       _applySelectedProducts(result);
+      // 手动输入条码的场景：选择后直接进入首行商品的数量录入
+      if (focusQty && result.isNotEmpty && _items.isNotEmpty) {
+        _focusAfterScan(null, targetRow: _items.first, focusQty: true);
+        return;
+      }
     }
     // 无论确认/取消，均将焦点交还扫码输入框，便于 PDA 连续录入
     if (returnFocusNode != null && mounted) {
       returnFocusNode.requestFocus();
     }
+  }
+
+  /// 是否显示红外条码扫描输入框（未审核 + 扫码设置开启红外输入 + 非零售配送模板）
+  bool get _showScanInput =>
+      !_isSigned && _scanSettings.showInfraredInput && !_lsPsMasterTemplateFlag;
+
+  /// 明细编辑弹窗确认关闭后焦点“落空”时，将焦点恢复到红外扫描框，支持连续扫码；
+  /// 焦点已落到其他输入框（用户主动点按）时不干预；弹窗收尾动画中最多重试 30 帧再评估
+  void _returnFocusToScanIfIdle([int retryFrame = 0]) {
+    if (!_showScanInput) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanInput) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点；收尾动画中重试等待
+      if (ModalRoute.of(context)?.isCurrent != true) {
+        if (retryFrame < 30) _returnFocusToScanIfIdle(retryFrame + 1);
+        return;
+      }
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
   }
 
   Future<void> _scanBarcode() async {
@@ -889,13 +989,91 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         MaterialPageRoute(builder: (_) => const QrCodeScannerPage()),
       );
       if (code == null || !mounted) return;
-      _handleScannedBarcode(code.toString());
+      // 仅摄像头模式下无扫描框可回焦，扫码后直接进入数量录入
+      _handleScannedBarcode(code.toString(), focusQty: !_scanSettings.showInfraredInput);
     } else {
       Toast.show('当前平台暂不支持扫码');
     }
   }
 
-  void _handleScannedBarcode(String code, {FocusNode? returnFocusNode}) {
+  /// 提交扫描框内容（扫码枪回车、软键盘搜索键、扫描无回车自动触发共用）
+  void _submitScanCode() {
+    final code = _scanController.text.trim();
+    if (code.isEmpty) return;
+    _scanDebounceTimer?.cancel();
+    // 手动输入条码属于单次录入，提交后直接进入数量录入
+    final fromManualInput = _scanManualMode;
+    _scanController.clear();
+    if (fromManualInput) {
+      // 先收起软键盘，避免录入请求期间继续误输入
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    }
+    _handleScannedBarcode(
+      code,
+      returnFocusNode: _scanSettings.showInfraredInput ? _scanFocusNode : null,
+      focusQty: fromManualInput,
+    );
+  }
+
+  /// 切换扫描框手动输入模式（弹出/收起软键盘，支持直接输入条码）
+  void _toggleScanManualInput() {
+    if (_scanManualMode) {
+      setState(() => _scanManualMode = false);
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      return;
+    }
+    setState(() => _scanManualMode = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.show');
+    });
+  }
+
+  /// 聚焦扫描枪输入框（退出手动输入，隐藏软键盘，便于下一轮扫码）
+  void _focusScanField() {
+    if (!mounted) return;
+    if (_scanManualMode) {
+      setState(() => _scanManualMode = false);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scanSettings.showInfraredInput) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
+  }
+
+  /// 录入商品后的焦点处理：
+  /// [focusQty] 为 true（手动输入条码）或关闭连续扫码时，聚焦该商品数量输入框并全选文本；
+  /// 否则回到扫描枪输入框，保持连续扫码。
+  void _focusAfterScan(FocusNode? returnFocusNode, {_DetailRow? targetRow, bool focusQty = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_readOnly && targetRow != null && (focusQty || !_scanSettings.scanContinuous)) {
+        // 新商品插入到首行：先滚回顶部，避免数量输入框在屏幕外获得焦点
+        if (_items.isNotEmpty &&
+            identical(_items.first, targetRow) &&
+            _scrollController.hasClients) {
+          _scrollController.jumpTo(0);
+        }
+        targetRow.qtyFocusNode.requestFocus();
+        targetRow.qtyController.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: targetRow.qtyController.text.length,
+        );
+        return;
+      }
+      if (returnFocusNode == null) return;
+      returnFocusNode.requestFocus();
+      // 手动输入模式保留软键盘，便于修改条码后重新提交
+      if (!_scanManualMode) {
+        SystemChannels.textInput.invokeMethod('TextInput.hide');
+      }
+    });
+  }
+
+  void _handleScannedBarcode(String code, {FocusNode? returnFocusNode, bool focusQty = false}) {
     if (code.trim().isEmpty) return;
     final scaleInfo = parseScaleBarcode(code);
     final searchCode = scaleInfo?.productCode ?? code;
@@ -913,12 +1091,13 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
       if (list.isEmpty) {
         Toast.show('未查询到该商品');
+        _focusAfterScan(returnFocusNode);
         return;
       }
       if (list.length > 1) {
         // 同一(秤)条码命中多条商品时无法自动确定目标：
         // 进入选择商品页并将条码粘贴到搜索框自动搜索，供用户挑选
-        _pickFromMultiple(searchCode, returnFocusNode: returnFocusNode);
+        _pickFromMultiple(searchCode, returnFocusNode: returnFocusNode, focusQty: focusQty);
         return;
       }
       final first = list.first as Map;
@@ -935,13 +1114,15 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       final existing =
           _items.indexWhere((r) => r.prodid == prodid && (barcode.isEmpty || r.barcode == barcode));
 
+      _DetailRow? targetRow;
       setState(() {
         if (existing >= 0) {
-          _items[existing].qtyController.text = c['qty']?.toString() ?? '';
-          _items[existing].priceController.text = c['price']?.toString() ?? '';
-          _items[existing].amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
-          _items[existing].amtController.text = c['amt']?.toString() ?? '';
-          _items[existing].rawData = c;
+          targetRow = _items[existing];
+          targetRow!.qtyController.text = c['qty']?.toString() ?? '';
+          targetRow!.priceController.text = c['price']?.toString() ?? '';
+          targetRow!.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
+          targetRow!.amtController.text = c['amt']?.toString() ?? '';
+          targetRow!.rawData = c;
         } else {
           final row = _DetailRow()
             ..prodid = prodid
@@ -953,14 +1134,16 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
           row.amt = double.tryParse(c['amt']?.toString() ?? '') ?? 0;
           row.amtController.text = c['amt']?.toString() ?? '';
           _items.insert(0, row);
+          targetRow = row;
         }
       });
 
-      if (returnFocusNode != null && mounted) {
-        returnFocusNode.requestFocus();
-      }
+      _focusAfterScan(returnFocusNode, targetRow: targetRow, focusQty: focusQty);
     }).catchError((_) {
-      if (mounted) Toast.show('查询商品失败');
+      if (mounted) {
+        Toast.show('查询商品失败');
+        _focusAfterScan(returnFocusNode);
+      }
     });
   }
 
@@ -1011,9 +1194,17 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       row.priceController.text = MathUtils.formatDecimal(2, newPrice);
       row.amt = newAmt;
       row.amtController.text = MathUtils.formatDecimal(3, newAmt);
+      // 对齐 Vue proDetails：切换单位后回填最新商品名称（列表与提交均取该名称）
+      final newName = result['productname']?.toString() ?? '';
+      if (newName.isNotEmpty) {
+        row.nameController.text = newName;
+      }
       if (raw != null) {
         // 弹窗返回完整商品数据（含单位/规格切换后的价格、packagenum、条码等），整体合并
         raw.addAll(result);
+        // 切换单位后同步列表商品名称（包装单位取包装名称）
+        final newName = raw['productname']?.toString() ?? '';
+        if (newName.isNotEmpty) row.nameController.text = newName;
         // 对齐 Vue writeData：qty 变化重算 jsqty/amt
         _applyWriteData(raw);
         row.amt = double.tryParse(raw['amt']?.toString() ?? '') ?? newAmt;
@@ -1022,6 +1213,8 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         if (nb.isNotEmpty) row.barcode = nb;
       }
     });
+    // 弹窗确认编辑后评估恢复扫描框焦点（连续扫码）
+    _returnFocusToScanIfIdle();
   }
 
   // =================== 明细数据处理（对齐 Vue writeData） ===================
@@ -1151,7 +1344,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
     setState(() {
       final sorted = _selectedIndices.toList()..sort((a, b) => b.compareTo(a));
       for (final i in sorted) {
-        _items[i].dispose();
+        _disposeRowsAfterFrame([_items[i]]);
         _items.removeAt(i);
       }
       _selectedIndices.clear();
@@ -1334,7 +1527,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final Widget page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1344,7 +1537,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? (_isSigned || _isRejected ? '要货申请单详情' : '修改要货申请单') : '新增要货申请单',
@@ -1359,6 +1552,13 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : _buildBody(),
     );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
+    );
   }
 
   Widget _buildBody() {
@@ -1367,6 +1567,7 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
       children: [
         Expanded(
           child: CustomScrollView(
+            controller: _scrollController,
             cacheExtent: 800,
             slivers: [
               if (_isEdit)
@@ -1399,22 +1600,33 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
               if (_items.isNotEmpty)
                 SliverList.builder(
                   itemCount: _items.length,
-                  itemBuilder: (context, index) => RepaintBoundary(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: _DetailItem(
-                        row: _items[index],
-                        index: index,
-                        isSelectMode: _isSelectMode,
-                        isSelected: _selectedIndices.contains(index),
-                        readOnly: _readOnly,
-                        onToggle: () => _toggleIndex(index),
-                        onProductTap: () => _editRowDetail(index),
-                        bsid: _outsid ?? '',
-                        onChanged: () => setState(() {}),
+                  itemBuilder: (context, index) {
+                    final row = _items[index];
+                    return RepaintBoundary(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: _DetailItem(
+                          key: ValueKey<_DetailRow>(row),
+                          row: row,
+                          index: index,
+                          isSelectMode: _isSelectMode,
+                          isSelected: _selectedIndices.contains(index),
+                          readOnly: _readOnly,
+                          onToggle: () => _toggleIndex(index),
+                          onProductTap: () => _editRowDetail(index),
+                          bsid: _outsid ?? '',
+                          // 生鲜商品（pricetype 2/3）数量仅可输入整数
+                          qtyIntOnly: _lsPsWeightIntFlag == 1,
+                          onChanged: () => setState(() {}),
+                          // 数量录入完成：刷新汇总并把焦点交回扫描枪输入框
+                          onQtyDone: () {
+                            if (mounted) setState(() {});
+                            _focusScanField();
+                          },
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 ),
               if (_items.isEmpty)
                 const SliverToBoxAdapter(
@@ -2259,7 +2471,9 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
   static Widget _buildReadonlyField({required String label, required String value}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      // 右侧文字过长换行时，标签与右侧文字第一行对齐（顶部对齐），不做整体垂直居中
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
             // 与编辑态 SelectFieldItem 标签宽度保持一致（80*4/3≈107）
@@ -2331,27 +2545,51 @@ class _EnquiryEditPageState extends State<EnquiryEditPage> with LogPageMixin<Enq
                 focusNode: _scanFocusNode,
                 autofocus: true,
                 showCursor: true,
-                keyboardType: TextInputType.none,
-                enableInteractiveSelection: false,
+                // 手动输入模式允许软键盘录入条码；扫描模式不弹软键盘，避免遮挡页面
+                keyboardType: _scanManualMode ? TextInputType.text : TextInputType.none,
+                enableInteractiveSelection: _scanManualMode,
                 style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
                 textInputAction: TextInputAction.search,
-                decoration: const InputDecoration(
-                  hintText: '请将扫描枪对准商品条码',
-                  hintStyle: TextStyle(fontSize: 13, color: Color(0xFFD1D5DB)),
-                  border: OutlineInputBorder(
+                // 软键盘搜索键/回车：提交条码录入商品
+                onSubmitted: (_) => _submitScanCode(),
+                decoration: InputDecoration(
+                  hintText: _scanManualMode ? '请输入商品条码' : '请将扫描枪对准商品条码',
+                  hintStyle: const TextStyle(fontSize: 13, color: Color(0xFFD1D5DB)),
+                  border: const OutlineInputBorder(
                     borderSide: BorderSide(color: Color(0xFFE5E7EB)),
                     borderRadius: BorderRadius.all(Radius.circular(8)),
                   ),
-                  enabledBorder: OutlineInputBorder(
+                  enabledBorder: const OutlineInputBorder(
                     borderSide: BorderSide(color: Color(0xFFE5E7EB)),
                     borderRadius: BorderRadius.all(Radius.circular(8)),
                   ),
-                  focusedBorder: OutlineInputBorder(
+                  focusedBorder: const OutlineInputBorder(
                     borderSide: BorderSide(color: Color(0xFF006EFF)),
                     borderRadius: BorderRadius.all(Radius.circular(8)),
                   ),
                   isDense: true,
-                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            // 扫描/手动输入切换：点击弹软键盘，可直接输入条码
+            GestureDetector(
+              onTap: _toggleScanManualInput,
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                width: 36,
+                height: 36,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  border: Border.all(
+                      color: _scanManualMode ? const Color(0xFF006EFF) : const Color(0xFFE5E7EB)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  _scanManualMode ? Icons.keyboard_hide : Icons.keyboard,
+                  size: 18,
+                  color: _scanManualMode ? const Color(0xFF006EFF) : const Color(0xFF6B7280),
                 ),
               ),
             ),
@@ -2368,22 +2606,28 @@ class _DetailRow {
   String barcode = '';
   final TextEditingController nameController = TextEditingController();
   final TextEditingController qtyController = TextEditingController();
+  final FocusNode qtyFocusNode = FocusNode();
   final TextEditingController priceController = TextEditingController();
   final TextEditingController amtController = TextEditingController();
   double? amt;
   Map<String, dynamic>? rawData;
+  bool _disposed = false;
 
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     nameController.dispose();
     qtyController.dispose();
+    qtyFocusNode.dispose();
     priceController.dispose();
     amtController.dispose();
   }
 }
 
 // =================== 明细列表项 Widget ===================
-class _DetailItem extends StatelessWidget {
+class _DetailItem extends StatefulWidget {
   const _DetailItem({
+    super.key,
     required this.row,
     required this.index,
     required this.isSelectMode,
@@ -2393,6 +2637,8 @@ class _DetailItem extends StatelessWidget {
     required this.onProductTap,
     required this.bsid,
     required this.onChanged,
+    this.qtyIntOnly = false,
+    this.onQtyDone,
   });
 
   final _DetailRow row;
@@ -2405,48 +2651,110 @@ class _DetailItem extends StatelessWidget {
   /// 点击商品信息打开商品详情弹窗（对齐 Vue proDetails 编辑明细）
   final VoidCallback onProductTap;
   final String bsid;
+
+  /// 数量/金额变更后通知父页面刷新底部合计
   final VoidCallback onChanged;
+
+  /// 生鲜商品（pricetype 2/3）数量仅可输入整数（对齐 lsPsWeightIntFlag）
+  final bool qtyIntOnly;
+
+  /// 数量录入完成（回车/完成），父页面将焦点交回扫描枪输入框
+  final VoidCallback? onQtyDone;
+
+  @override
+  State<_DetailItem> createState() => _DetailItemState();
+}
+
+class _DetailItemState extends State<_DetailItem> {
+  /// 生鲜商品（pricetype 2/3）且 lsPsWeightIntFlag == 1 时数量仅可输入整数
+  bool get _intOnly =>
+      widget.qtyIntOnly &&
+      (widget.row.rawData?['pricetype']?.toString() == '2' ||
+          widget.row.rawData?['pricetype']?.toString() == '3');
+
+  /// 数量变化后重算金额（对齐 Vue writeData：amt = qty × price）
+  void _recalcAmt({bool notify = false}) {
+    final row = widget.row;
+    final qty = double.tryParse(row.qtyController.text) ?? 0;
+    final price = double.tryParse(row.priceController.text) ?? 0;
+    row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
+    row.amtController.text = MathUtils.formatDecimal(3, row.amt);
+    if (row.rawData != null) {
+      row.rawData!['qty'] = MathUtils.formatDecimalNum(1, qty);
+      row.rawData!['amt'] = row.amt;
+    }
+    if (notify) widget.onChanged();
+  }
+
+  /// 数量失焦/提交：格式化数量并重算金额
+  void _commitQty() {
+    if (!mounted) return;
+    final row = widget.row;
+    var qty = double.tryParse(row.qtyController.text) ?? 0;
+    if (_intOnly) qty = qty.truncateToDouble();
+    if (qty < 0) qty = 0;
+    final text = MathUtils.formatDecimal(1, qty);
+    if (text != row.qtyController.text) row.qtyController.text = text;
+    setState(() {});
+    _recalcAmt(notify: true);
+  }
+
+  void _onQtySubmitted() {
+    _commitQty();
+    if (mounted) widget.onQtyDone?.call();
+  }
+
+  /// 格式化商品名称（对齐 Vue：productname/size（unit））
+  static String _formatProductName(String name, String size, String unit) {
+    final sb = StringBuffer(name);
+    if (size.isNotEmpty) sb.write('/$size');
+    if (unit.isNotEmpty) sb.write('（$unit）');
+    return sb.toString();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final String nameText = row.nameController.text;
+    final row = widget.row;
+    final String nameText = _formatProductName(row.nameController.text,
+        row.rawData?['size']?.toString() ?? '', row.rawData?['unit']?.toString() ?? '');
     final String qtyText = row.qtyController.text;
     final String amtText = row.amtController.text;
     final String priceText = row.priceController.text;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
-      ),
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (isSelectMode) ...[
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: Checkbox(
-                      value: isSelected,
-                      activeColor: const Color(0xFF006EFF),
-                      onChanged: (_) => onToggle(),
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    return GestureDetector(
+      // 整卡可点击：选择模式切换选中，否则弹出商品详情（数量输入框仍可正常编辑）
+      onTap: widget.isSelectMode ? widget.onToggle : (widget.readOnly ? null : widget.onProductTap),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        decoration: BoxDecoration(
+          color: widget.index.isOdd ? const Color(0xFFFAFAFA) : Colors.white,
+        ),
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (widget.isSelectMode) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: Checkbox(
+                        value: widget.isSelected,
+                        activeColor: const Color(0xFF006EFF),
+                        onChanged: (_) => widget.onToggle(),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-              ],
-              // 列1: 商品名称（点击弹商品详情弹窗）
-              Expanded(
-                flex: 6,
-                child: GestureDetector(
-                  onTap: isSelectMode ? onToggle : (readOnly ? null : onProductTap),
-                  behavior: HitTestBehavior.opaque,
+                  const SizedBox(width: 8),
+                ],
+                // 列1: 商品名称
+                Expanded(
+                  flex: 6,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -2467,32 +2775,85 @@ class _DetailItem extends StatelessWidget {
                     ],
                   ),
                 ),
+                const SizedBox(width: 8),
+                // 列2: 数量（可编辑，回车/完成后焦点回到扫描框）
+                Expanded(
+                  flex: 4,
+                  child: widget.readOnly
+                      ? Text('数量：$qtyText',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                          textAlign: TextAlign.right)
+                      : Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            const Text('数量：',
+                                style: TextStyle(fontSize: 12, color: Color(0xFF111827))),
+                            SizedBox(
+                              width: 66,
+                              height: 30,
+                              child: Focus(
+                                // 数量框失焦：格式化数量并重算金额
+                                onFocusChange: (hasFocus) {
+                                  if (!hasFocus) _commitQty();
+                                },
+                                child: TextField(
+                                  controller: row.qtyController,
+                                  focusNode: row.qtyFocusNode,
+                                  keyboardType:
+                                      const TextInputType.numberWithOptions(decimal: true),
+                                  // 输入过程允许小数点，提交/失焦时按 _intOnly 取整，避免过滤小数点导致数量异常放大
+                                  inputFormatters: [
+                                    FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
+                                  ],
+                                  textAlign: TextAlign.right,
+                                  textInputAction: TextInputAction.done,
+                                  style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                                  onChanged: (_) {
+                                    _recalcAmt();
+                                    setState(() {});
+                                  },
+                                  onSubmitted: (_) => _onQtySubmitted(),
+                                  decoration: const InputDecoration(
+                                    isDense: true,
+                                    contentPadding:
+                                        EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+                                    border: OutlineInputBorder(
+                                      borderSide: BorderSide(color: Color(0xFFE5E7EB)),
+                                      borderRadius: BorderRadius.all(Radius.circular(6)),
+                                    ),
+                                    enabledBorder: OutlineInputBorder(
+                                      borderSide: BorderSide(color: Color(0xFFE5E7EB)),
+                                      borderRadius: BorderRadius.all(Radius.circular(6)),
+                                    ),
+                                    focusedBorder: OutlineInputBorder(
+                                      borderSide: BorderSide(color: Color(0xFF006EFF)),
+                                      borderRadius: BorderRadius.all(Radius.circular(6)),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(children: [
+              Expanded(
+                flex: 6,
+                child: Text('配送价：¥$priceText',
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
               ),
-              const SizedBox(width: 8),
-              // 列2: 数量（右对齐）
               Expanded(
                 flex: 4,
-                child: Text('数量：$qtyText',
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                child: Text('金额：$amtText',
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                     textAlign: TextAlign.right),
               ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Row(children: [
-            Expanded(
-              flex: 6,
-              child: Text('配送价：¥$priceText',
-                  style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-            ),
-            Expanded(
-              flex: 4,
-              child: Text('金额：$amtText',
-                  style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-                  textAlign: TextAlign.right),
-            ),
-          ]),
-        ],
+            ]),
+          ],
+        ),
       ),
     );
   }
@@ -3317,10 +3678,21 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
   void _applyExtendResult(String type, Map<String, dynamic> r) {
     setState(() {
       if (type == 'unit') {
+        // 对齐 Vue proDetails.selectUnitFn：切换单位时同步商品名称
+        // 直接用接口回传的包装名称 packname；未回传时用接口回传的商品名称 name
+        final String packName = r['packname']?.toString() ?? '';
+        final String resName = r['name']?.toString() ?? '';
+        final String newProductName = packName.isNotEmpty ? packName : resName;
+        if (newProductName.isNotEmpty) {
+          widget.productData['productname'] = newProductName;
+          widget.productData['name'] = newProductName;
+        }
         final u = r['unit']?.toString() ?? r['_name']?.toString() ?? '';
         if (u.isNotEmpty) _currentUnit = u;
         final uid = r['unitonlyid']?.toString() ?? r['_id']?.toString() ?? '';
         if (uid.isNotEmpty) _unitonlyid = uid;
+        // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+        syncUnitProductName(widget.productData, r, unitonlyid: uid);
         // 对齐 Vue unitConfirm：price = lspsprice
         final psprice = r['lspsprice']?.toString() ?? r['psprice']?.toString();
         if (psprice != null) {

@@ -131,9 +131,25 @@ class _NewApplicationListPageState extends State<NewApplicationListPage>
   }
 
   Future<void> _onRefresh() async {
+    // 上拉加载进行中时先等它结束，否则会被 _loadData 的 _loading 守卫吞掉、列表停在旧数据
+    var waited = 0;
+    while (_loading && waited < 40) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      waited++;
+    }
     _page = 1;
     _hasMore = true;
     await _loadData();
+    _scrollToTop();
+  }
+
+  /// 刷新后回到顶部：新增/编辑保存返回时列表已重建为第一页，需复位滚动位置
+  void _scrollToTop() {
+    if (!mounted || !_scrollController.hasClients) return;
+    // 等新数据完成布局后再复位，否则会被旧的 maxScrollExtent 回弹
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _scrollController.hasClients) _scrollController.jumpTo(0);
+    });
   }
 
   void _onSearch() {

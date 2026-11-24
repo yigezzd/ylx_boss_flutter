@@ -32,6 +32,9 @@ class _ChangePriceListPageState extends State<ChangePriceListPage> {
 
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _searchController = TextEditingController();
+
+  /// 搜索框焦点（进入页面即聚焦，PDA 扫码枪可直接扫码录入）
+  final FocusNode _searchFocusNode = FocusNode();
   Timer? _debounce;
 
   // ── 筛选参数 ──
@@ -43,6 +46,12 @@ class _ChangePriceListPageState extends State<ChangePriceListPage> {
   @override
   void initState() {
     super.initState();
+    // 进入页面即聚焦搜索框（首帧后 FocusNode 已挂载，聚焦才生效）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _searchFocusNode.requestFocus();
+      }
+    });
     _scrollController.addListener(_onScroll);
     // 默认当前门店
     try {
@@ -73,6 +82,7 @@ class _ChangePriceListPageState extends State<ChangePriceListPage> {
   void dispose() {
     _scrollController.dispose();
     _searchController.dispose();
+    _searchFocusNode.dispose();
     _debounce?.cancel();
     super.dispose();
   }
@@ -178,6 +188,8 @@ class _ChangePriceListPageState extends State<ChangePriceListPage> {
     if (code != null && code.isNotEmpty && mounted) {
       _searchController.text = code;
       _onSearch();
+      // 从扫码页返回后把光标交回搜索框，保持扫码枪连续录入
+      _searchFocusNode.requestFocus();
     }
   }
 
@@ -234,6 +246,7 @@ class _ChangePriceListPageState extends State<ChangePriceListPage> {
                             builder: (context, value, _) {
                               return TextField(
                                 controller: _searchController,
+                                focusNode: _searchFocusNode,
                                 onSubmitted: (_) => _onSearch(),
                                 decoration: InputDecoration(
                                   hintText: '条码/品名/自编码',

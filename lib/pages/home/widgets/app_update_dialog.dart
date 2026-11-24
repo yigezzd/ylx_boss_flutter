@@ -28,7 +28,6 @@ class AppUpdateDialog extends StatefulWidget {
   /// 更新说明，多行文本
   final String updateDesc;
   
-  /// APK 下载地址（Android 使用）
   final String downloadUrl;
   
   /// 是否强制更新（true 时不显示"稍后提醒"按钮，禁止关闭弹窗）
@@ -306,10 +305,33 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     );
   }
 
-  void _handleUpdate() {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      Navigator.of(context).pop();
-      VersionUtils.jumpAppStore();
+  Future<void> _handleUpdate() async {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+      final updateAddress = widget.downloadUrl.trim();
+      if (updateAddress.isEmpty) {
+        return;
+      }
+
+      try {
+        final opened = await launchUrl(
+          Uri.parse(updateAddress),
+          mode: LaunchMode.externalApplication,
+        );
+        if (!mounted) {
+          return;
+        }
+        if (!opened) {
+          Toast.show('无法打开 App Store，请稍后重试');
+          return;
+        }
+        if (!widget.forceUpdate) {
+          Navigator.of(context).pop();
+        }
+      } catch (_) {
+        if (mounted) {
+          Toast.show('无法打开 App Store，请稍后重试');
+        }
+      }
     } else if (kIsWeb) {
       // Web 平台：直接在新标签页打开下载地址，浏览器会自动触发下载
       Navigator.of(context).pop();

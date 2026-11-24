@@ -167,14 +167,39 @@ class _MainHomePageState extends State<MainHomePage> {
       final storeStr = SpUtil.getString(Constant.store) ?? '';
       if (storeStr.isNotEmpty) {
         final store = jsonDecode(storeStr) as Map<String, dynamic>;
+        final storeId = store['id']?.toString() ?? '';
+        final spId = store['spid']?.toString() ?? '';
+        // 总部（总店）默认查全部门店；bosshomespidflag 有值时以其为准（1=全部，否则总部自己）
+        final bool isBoss = storeId.isNotEmpty && storeId == spId;
+        final String? bossFlag = isBoss ? _bossHomeSpidFlag() : null;
+        final bool viewAllStores = isBoss && (bossFlag == null || bossFlag == '1');
         setState(() {
-          _storeName = store['name']?.toString() ?? '欢迎使用';
-          _storeId = store['id']?.toString() ?? '';
-          _spId = store['spid']?.toString() ?? '';
-          _activeStoreId = _storeId;
+          _spId = spId;
+          if (viewAllStores) {
+            _storeId = '';
+            _activeStoreId = '';
+            _storeName = '全部机构';
+          } else {
+            _storeId = storeId;
+            _activeStoreId = storeId;
+            _storeName = store['name']?.toString() ?? '欢迎使用';
+          }
         });
       }
     } catch (_) {}
+  }
+
+  /// 读取 loginParamResp.bosshomespidflag，未配置或空值返回 null
+  static String? _bossHomeSpidFlag() {
+    try {
+      final cfgStr = SpUtil.getString(Constant.loginParamResp) ?? '';
+      if (cfgStr.isEmpty) return null;
+      final cfg = jsonDecode(cfgStr) as Map<String, dynamic>;
+      final flag = cfg['bosshomespidflag']?.toString() ?? '';
+      return flag.isEmpty ? null : flag;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 切换机构（对齐采购入库 _selectStore）
@@ -188,9 +213,10 @@ class _MainHomePageState extends State<MainHomePage> {
     if (result != null && mounted) {
       setState(() {
         final storeId = result['storeid']?.toString() ?? '';
+        final storeName = result['storename']?.toString() ?? '';
         _activeStoreId = storeId;
         _storeId = storeId;
-        _storeName = result['storename']?.toString() ?? '全部机构';
+        _storeName = storeName.isEmpty ? '全部机构' : storeName;
         _spId = result['spid']?.toString() ?? '';
       });
       _fetchAllData();

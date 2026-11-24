@@ -359,7 +359,8 @@ class _PrepackDetailSheetState extends State<PrepackDetailSheet> {
                   '包装数量',
                   qtyFromScan
                       ? Text(
-                          MathUtils.formatDecimal(2, _item['packQty'] ?? 0),
+                          // 包装数量小数位跟随后台条码秤重量精度（webWeightInt）
+                          formatScaleQty(_item['packQty'] ?? 0),
                           style: const TextStyle(
                               fontSize: 15, fontWeight: FontWeight.w600, color: _textColor),
                         )
@@ -525,7 +526,7 @@ class _DoubleStepper extends StatelessWidget {
           width: 48,
           alignment: Alignment.center,
           child: Text(
-            MathUtils.formatDecimal(2, value),
+            formatScaleQty(value),
             style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
           ),
         ),

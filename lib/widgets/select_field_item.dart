@@ -14,6 +14,7 @@ class SelectFieldItem extends StatelessWidget {
     this.required = false,
     this.labelWidth = 80,
     this.enabled = true,
+    this.trailing,
   });
 
   /// 标签文字
@@ -36,6 +37,9 @@ class SelectFieldItem extends StatelessWidget {
 
   /// 标签宽度，默认 80（与 _buildTextField 等表单字段对齐）
   final double labelWidth;
+
+  /// 值区域尾部自定义控件（如清空按钮），展示在值与右箭头之间
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -90,6 +94,10 @@ class SelectFieldItem extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              if (trailing != null) ...[
+                const SizedBox(width: 6),
+                trailing!,
+              ],
               const Icon(Icons.chevron_right, size: 18, color: Color(0xFF9CA3AF)),
             ],
           ),

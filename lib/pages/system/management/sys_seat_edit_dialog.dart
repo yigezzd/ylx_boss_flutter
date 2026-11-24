@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_deer/components/select/select_store.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
-import 'package:flutter_deer/util/toast_utils.dart';
 
 /// 站点设备编辑弹窗（对齐 Vue sysseat editDrawerRef）
 class SysSeatEditDialog extends StatefulWidget {
@@ -23,26 +21,28 @@ class _SysSeatEditDialogState extends State<SysSeatEditDialog> {
     _form = Map<String, dynamic>.from(widget.item);
   }
 
-  Future<void> _selectStore() async {
-    final result = await SelectStorePage.show(context);
-    if (result != null && mounted) {
-      setState(() {
-        _form['storeid'] = result['storeid']?.toString() ?? '';
-        _form['storename'] = result['storename']?.toString() ?? '';
-      });
-    }
+  /// 绑定站点文案（对齐 Vue：editSiteForm.seatcode || seatCode || 未绑定）
+  String get _seatcode {
+    final String code = _form['seatcode']?.toString() ?? '';
+    final String alt = _form['seatCode']?.toString() ?? '';
+    final String value = code.isNotEmpty ? code : alt;
+    return value.isNotEmpty ? value : '未绑定';
   }
 
   Future<void> _save() async {
+    if (!(_formKey.currentState?.validate() ?? false)) {
+      return;
+    }
+    _formKey.currentState?.save();
     try {
+      // 对齐 Vue saveEditSite：先 checkMachine 再 update
       await request(HttpApi.machineCheck, _form);
       await request(HttpApi.machineUpdate, _form);
       if (mounted) {
-        Toast.show('保存成功');
         Navigator.of(context).pop(true);
       }
     } catch (_) {
-      if (mounted) Toast.show('保存失败');
+      // 失败提示由 http_helper 统一弹出后端 retmsg，此处不覆盖
     }
   }
 
@@ -79,18 +79,30 @@ class _SysSeatEditDialogState extends State<SysSeatEditDialog> {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 children: [
                   _readOnly('设备编号', _form['code']),
+                  _readOnly('绑定站点', _seatcode),
                   _readOnly('所属门店', _form['storename']),
                   _textField('设备名称', 'name'),
-                  _readOnly('设备类型', _form['clienttypename']),
+                  _readOnly('设备类型', _firstText([_form['clienttypeName'], _form['clienttypename']])),
                   _readOnly('设备版本', _form['vcode']),
                   _readOnly('设备ID', _form['serialno']),
-                  _switchField('授权状态', 'stopflag'),
-                  _checkField('储卡充值', 'vipcharge'),
-                  _checkField('储卡消费', 'vipmoney'),
-                  _switchField('商城接单', 'getmallorder'),
-                  _switchField('自动接单', 'getautoorderflag'),
-                  _switchField('外卖接单', 'gettakeoutorder'),
-                  _switchField('外卖自动接单', 'gettakeoutautoflag'),
+                  _switchField('授权状态', 'stopflag', onValue: 0, offValue: 1),
+                  _groupRow('储卡业务', [
+                    _inlineCheck('储卡充值', 'vipcharge'),
+                    const SizedBox(width: 12),
+                    _inlineCheck('储卡消费', 'vipmoney'),
+                  ]),
+                  _groupRow('商城接单', [
+                    _inlineSwitch('getmallorder'),
+                    const SizedBox(width: 12),
+                    _inlineCheck('自动接单', 'getautoorderflag',
+                        enabled: _form['getmallorder']?.toString() == '1'),
+                  ]),
+                  _groupRow('外卖接单', [
+                    _inlineSwitch('gettakeoutorder'),
+                    const SizedBox(width: 12),
+                    _inlineCheck('自动接单', 'gettakeoutautoflag',
+                        enabled: _form['gettakeoutorder']?.toString() == '1'),
+                  ]),
                   _readOnly('最后登录IP', _form['lastip']),
                   _readOnly('最后登录时间', _form['lasttime']),
                   _readOnly('最后登录用户', _form['lastuser']),
@@ -126,6 +138,17 @@ class _SysSeatEditDialogState extends State<SysSeatEditDialog> {
     );
   }
 
+  /// 多字段取值：返回第一个非空值（对齐 Vue `a || b || '--'`）
+  static String? _firstText(List<dynamic> values) {
+    for (final dynamic value in values) {
+      final String text = value?.toString() ?? '';
+      if (text.isNotEmpty) {
+        return text;
+      }
+    }
+    return null;
+  }
+
   Widget _readOnly(String label, dynamic value) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -157,6 +180,7 @@ class _SysSeatEditDialogState extends State<SysSeatEditDialog> {
               textAlign: TextAlign.right,
               style: const TextStyle(fontSize: 14),
               decoration: const InputDecoration(isDense: true, border: UnderlineInputBorder()),
+              validator: (v) => (v ?? '').trim().isEmpty ? '请输入$label' : null,
               onSaved: (v) => _form[key] = v ?? '',
             ),
           ),
@@ -165,7 +189,8 @@ class _SysSeatEditDialogState extends State<SysSeatEditDialog> {
     );
   }
 
-  Widget _switchField(String label, String key, {String onLabel = '启用', String offLabel = '停用'}) {
+  /// 开关行：value 为 true 时写入 [onValue]，否则写入 [offValue]
+  Widget _switchField(String label, String key, {int onValue = 1, int offValue = 0}) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -175,29 +200,56 @@ class _SysSeatEditDialogState extends State<SysSeatEditDialog> {
               child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF666666)))),
           const Spacer(),
           Switch(
-            value: (_form[key] ?? 0) != 0,
-            onChanged: (v) => setState(() => _form[key] = v ? 1 : 0),
+            value: (_form[key]?.toString() ?? '') == onValue.toString(),
+            onChanged: (v) => setState(() => _form[key] = v ? onValue : offValue),
           ),
         ],
       ),
     );
   }
 
-  Widget _checkField(String label, String key) {
+  /// 组合行（储卡业务 / 商城接单 / 外卖接单）
+  Widget _groupRow(String label, List<Widget> children) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
           SizedBox(
               width: 100,
               child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF666666)))),
           const Spacer(),
-          Checkbox(
-            value: (_form[key] ?? 0) == 1,
-            onChanged: (v) => setState(() => _form[key] = v ?? false ? 1 : 0),
-          ),
+          ...children,
         ],
       ),
+    );
+  }
+
+  Widget _inlineSwitch(String key) {
+    return Transform.scale(
+      scale: 0.85,
+      child: Switch(
+        value: _form[key]?.toString() == '1',
+        onChanged: (v) => setState(() => _form[key] = v ? 1 : 0),
+      ),
+    );
+  }
+
+  Widget _inlineCheck(String label, String key, {bool enabled = true}) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Transform.scale(
+          scale: 0.85,
+          child: Checkbox(
+            value: _form[key]?.toString() == '1',
+            visualDensity: VisualDensity.compact,
+            onChanged: enabled ? (v) => setState(() => _form[key] = (v ?? false) ? 1 : 0) : null,
+          ),
+        ),
+        Text(label,
+            style: TextStyle(
+                fontSize: 13, color: enabled ? const Color(0xFF333333) : const Color(0xFF9CA3AF))),
+      ],
     );
   }
 }

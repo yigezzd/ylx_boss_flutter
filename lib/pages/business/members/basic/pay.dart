@@ -84,18 +84,22 @@ class _MemberPayPageState extends State<MemberPayPage> {
     }
   }
 
-  /// 扫描付款码（对齐 Vue scanQrClose：微信/支付宝需扫 18 位付款码）
+  /// 扫描付款码（对齐 Vue scanQrClose：微信/支付宝/云闪付需扫 18 位付款码）
   Future<void> _scanPayCode() async {
     final code = await Navigator.push<String>(
       context,
       MaterialPageRoute<String>(builder: (_) => const QrCodeScannerPage()),
     );
     if (!mounted) return;
-    if (code == null || code.isEmpty || code.length != 18) {
+    // 付款码位数按支付方式区分：微信/支付宝 18 位，云闪付 19 位（兼容 18 位）
+    final payCode = (code ?? '').trim();
+    final validCode = RegExp(r'^\d+$').hasMatch(payCode) &&
+        (_payid == '13' ? payCode.length == 18 || payCode.length == 19 : payCode.length == 18);
+    if (!validCode) {
       Toast.show('请扫描正确的付款码');
       return;
     }
-    _authCode = code;
+    _authCode = payCode;
     _pay();
   }
 
@@ -112,8 +116,8 @@ class _MemberPayPageState extends State<MemberPayPage> {
       return;
     }
 
-    // 微信/支付宝需付款码
-    if ((_payid == '03' || _payid == '04') && _authCode.isEmpty) {
+    // 微信/支付宝/云闪付需付款码
+    if ((_payid == '03' || _payid == '04' || _payid == '13') && _authCode.isEmpty) {
       _scanPayCode();
       return;
     }

@@ -10,6 +10,7 @@ class VippayListPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return VipSelectListPage(
       title: '会员收款',
+      showRecord: true,
       editRouteName: '/业务/会员/会员收款',
       buildEditPage: (item) => MemberVippayEditPage(vipInfo: item),
     );

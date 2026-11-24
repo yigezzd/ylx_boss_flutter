@@ -14,6 +14,7 @@ class CategoryListPage extends StatefulWidget {
     this.isMultiSelect = false,
     this.initialSelectedIds,
     this.showAll = false,
+    this.manualParentCheck = false,
   });
   final bool isSelect;
   final bool isMultiSelect;
@@ -21,6 +22,12 @@ class CategoryListPage extends StatefulWidget {
 
   /// 是否在列表顶部显示“全部分类”选项（仅多选模式有效）
   final bool showAll;
+
+  /// 是否只向下联动（对齐 zmProMax selectType.vue manual-parent-check）
+  /// - 勾选父级：连带勾选其下全部子孙
+  /// - 勾选子级：不向上勾选父级（父级仅手动勾选时才进入结果）
+  /// - 取消勾选：连带取消其下全部子孙，并向上取消所有祖先
+  final bool manualParentCheck;
 
   @override
   State<CategoryListPage> createState() => _CategoryListPageState();
@@ -145,9 +152,22 @@ class _CategoryListPageState extends State<CategoryListPage> {
     }
   }
 
+  // ─── 向上取消所有祖先节点（只向上取消，不向上勾选） ──────────
+  void _uncheckAncestors(String nodeId) {
+    var parentId = _parentMap[nodeId];
+    while (parentId != null && parentId.isNotEmpty) {
+      _selectedIds.remove(parentId);
+      parentId = _parentMap[parentId];
+    }
+  }
+
   // ─── 重新计算半选节点集合 ──────────────────────────────────
   void _recomputeIndeterminate() {
     _indeterminateIds.clear();
+    // 严格联动模式下父级不呈现半选，未手动勾选即保持未勾选（对齐 zmProMax check-strictly）
+    if (widget.manualParentCheck) {
+      return;
+    }
     for (final entry in _nodeMap.entries) {
       final id = entry.key;
       final node = entry.value;
@@ -913,17 +933,27 @@ class _CategoryListPageState extends State<CategoryListPage> {
     if (widget.isMultiSelect) {
       final id = node['typeid']?.toString() ?? '';
       if (id.isEmpty) return;
-      final descendantIds = _getDescendantIds(node);
+      // 搜索过滤后的节点是副本，取原始节点保证级联覆盖全部子孙（对齐 Boss：搜索只影响展示）
+      final fullNode = _nodeMap[id] ?? node;
+      final descendantIds = _getDescendantIds(fullNode);
       setState(() {
         _allSelected = false;
         if (_selectedIds.contains(id)) {
-          // 取消：移除本节点及其所有子孙，并向上同步祖先状态
+          // 取消：移除本节点及其所有子孙
           _selectedIds.removeAll(descendantIds);
-          _syncUp(id);
+          if (widget.manualParentCheck) {
+            // 严格联动：只向上取消所有祖先，不做向上勾选
+            _uncheckAncestors(id);
+          } else {
+            _syncUp(id);
+          }
         } else {
-          // 选中：加入本节点及其所有子孙，并向上同步祖先状态
+          // 选中：加入本节点及其所有子孙
           _selectedIds.addAll(descendantIds);
-          _syncUp(id);
+          // 严格联动：勾选子级不向上勾选父级，父级仅手动勾选才进入结果
+          if (!widget.manualParentCheck) {
+            _syncUp(id);
+          }
         }
         _refreshSelectedNodes();
         _recomputeIndeterminate();

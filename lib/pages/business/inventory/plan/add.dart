@@ -12,6 +12,7 @@ import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/common_select_page.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 class InventoryPlanAddPage extends StatefulWidget {
@@ -34,11 +35,13 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
 
   String? _bsid; // 机构ID
   String? _storename;
-  String? _counterid;
+  String? _counterid; 
   String? _countername;
   String _clearflag = '1'; // 0=库存不变 1=库存清零
   String _openflag = '1'; // 1=营业中盘点 0=停业盘点
   int _checktype = 2; // 1=全场 2=分类 3=供应商 4=品牌
+  int _lockmode = 2; // Lock mode for checktype=1: 1=system immediate lock, 2=manual lock
+  int _lockflag = 0; // Lock status for checktype=1: 0=not locked, 1=lock immediately
   List<Map<String, dynamic>> _typeList = []; // 分类/供应商/品牌列表
 
   bool _submitting = false;
@@ -48,6 +51,9 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
   // ---- 批量选择模式 ----
   bool _isSelectMode = false;
   Set<int> _selectedIndices = {};
+
+  /// 未保存修改比对基线（进入页面/加载完成/保存完成后更新）
+  String _formSnapshot = '';
 
   bool get _isEdit => _billData != null && (_billData!['billid']?.toString().isNotEmpty ?? false);
   bool get _isSigned => _billData?['signflag']?.toString() == '1';
@@ -60,6 +66,8 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
     } else {
       _loadDefaults();
     }
+    // 新增模式：默认值回填后建立基线，未改动直接返回不弹窗
+    _refreshSnapshot();
     logEnter();
   }
 
@@ -95,12 +103,16 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
           _clearflag = data['clearflag']?.toString() ?? '1';
           _openflag = data['openflag']?.toString() ?? '1';
           _checktype = int.tryParse(data['checktype']?.toString() ?? '') ?? 2;
+          _lockmode = int.tryParse(data['lockmode']?.toString() ?? '') ?? 2;
+          _lockflag = int.tryParse(data['lockflag']?.toString() ?? '') ?? 0;
           final typeArr = data['stockPlanItemtypeResp'] as List? ?? [];
           _typeList = typeArr.cast<Map<String, dynamic>>();
         });
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
   }
 
@@ -163,8 +175,53 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
     }
   }
 
+  // ═══ 返回与未保存修改检测 ═══
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _plannameCtrl.text,
+      _bsid,
+      _counterid,
+      _clearflag,
+      _openflag,
+      _checktype.toString(),
+      _lockmode.toString(),
+      _lockflag.toString(),
+      _remarkCtrl.text,
+      jsonEncode(_typeList),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/待审核（signflag 0）单据；
+  /// 已审核(1)/已驳回(2) 为只读或撤回态，无保存入口，直接放行
+  bool get _guardEnabled => (_billData?['signflag']?.toString() ?? '0') == '0';
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      _save(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
   // ── 保存 ──
-  void _save() {
+  void _save({bool popAfterSave = false}) {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('013603', showTip: false)) {
         Toast.show('你无权编辑盘点计划，请在后台修改权限');
@@ -204,11 +261,13 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
       'planname': _plannameCtrl.text.trim(),
       'bsid': _bsid,
       'storename': _storename,
-      'counterid': _counterid,
+      'counterid': _counterid, 
       'countername': _countername,
       'clearflag': _clearflag,
       'openflag': _openflag,
       'checktype': _checktype,
+      'lockmode': _lockmode,
+      'lockflag': _lockflag,
       'remark': _remarkCtrl.text.trim(),
       'stockPlanItemtypeResp': _typeList,
     };
@@ -221,6 +280,10 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
         setState(() => _billData = data);
       }
       Toast.show('保存成功');
+      // 保存成功后重建基线，避免返回时重复提示
+      _refreshSnapshot();
+      // 返回拦截中选择「保存」：保存成功后直接返回上一页
+      if (popAfterSave && mounted) Navigator.pop(context, true);
     }).whenComplete(() {
       if (mounted) setState(() => _submitting = false);
     });
@@ -270,7 +333,7 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
     });
   }
 
-  // ── 选择盘点范围 ──
+  // ── 选择盘点类型 ──
   void _showChecktypeSheet() {
     if (_isSigned) return;
     FocusScope.of(context).unfocus(); // 取消焦点，防止键盘弹出
@@ -302,7 +365,7 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
               ),
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 14),
-                child: Text('选择盘点范围', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                child: Text('选择盘点类型', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
               ),
               const Divider(height: 1, color: Color(0xFFE5E7EB)),
               ...options.map((opt) {
@@ -316,12 +379,17 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
                     if (newVal == _checktype) {
                       return;
                     }
+                    // No line items yet: switch directly without the confirm dialog (align lxAss)
+                    if (_typeList.isEmpty) {
+                      setState(() => _checktype = newVal);
+                      return;
+                    }
                     SchedulerBinding.instance.addPostFrameCallback((_) {
                       showDialog<bool>(
                         context: context,
                         builder: (c) => AlertDialog(
                           title: const Text('提示'),
-                          content: const Text('切换盘点范围将清空单据内容，是否继续切换？'),
+                          content: const Text('切换盘点类型将清空单据内容，是否继续切换？'),
                           actions: [
                             TextButton(
                                 onPressed: () => Navigator.pop(c, false), child: const Text('取消')),
@@ -472,11 +540,45 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
     }
   }
 
+  // Lock mode text (align lxAss locktypeList): 1=system immediate lock, 2=manual lock
+  String _lockmodeName(int v) => v == 2 ? '人工手动锁定' : '系统立即锁定';
+
+  // Lock status text (align lxAss lockstatusList): 0=not locked, 1=lock immediately
+  String _lockflagName(int v) => v == 1 ? '立即锁定' : '暂不锁定';
+
+  // Info dialog for lock mode explanation (align lxAss handleOpenlockModel)
+  void _showLockmodeTip() {
+    _showLockTip('1、系统立即锁定：全场盘点方式，保存后立即盘点锁定\n\n'
+        '2、人工手动锁定：全场盘点方式，手动调整立即锁定，同时支持保存计划后手工盘点锁定操作');
+  }
+
+  // Info dialog for lock status explanation (align lxAss handleOpenlockflagModel)
+  void _showLockflagTip() {
+    _showLockTip('1、暂不锁定：保存时，当前盘点计划暂不盘点锁定\n\n2、立即锁定：保存时，当前盘点计划立即盘点锁定');
+  }
+
+  void _showLockTip(String text) {
+    FocusScope.of(context).unfocus();
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('说明'),
+        content: Text(
+          text,
+          style: const TextStyle(fontSize: 14, height: 1.7, color: Color(0xFF333333)),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final disabled = _isSigned;
 
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -485,7 +587,7 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(_isEdit ? '修改盘点计划' : '新增盘点计划',
             style: const TextStyle(
@@ -578,43 +680,92 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
                           disabled: disabled,
                           required: true),
                       _buildDivider(),
-                      _buildSelectRow(
-                        label: '未盘商品处理',
-                        value: _clearflag == '1' ? '库存清零' : '库存不变',
-                        onTap: () => _showOptionSheet(
-                          title: '选择未盘商品处理',
-                          currentValue: _clearflag,
-                          options: [
-                            {'label': '库存不变', 'value': '0'},
-                            {'label': '库存清零', 'value': '1'},
-                          ],
-                          onSelected: (v) => setState(() => _clearflag = v),
+                      // Unscanned-goods handling is hidden for full inventory (align lxAss: checktype != 1)
+                      if (_checktype != 1) ...[
+                        _buildSelectRow(
+                          label: '未盘商品处理',
+                          value: _clearflag == '1' ? '库存清零' : '库存不变',
+                          onTap: () => _showOptionSheet(
+                            title: '选择未盘商品处理',
+                            currentValue: _clearflag,
+                            options: [
+                              {'label': '库存不变', 'value': '0'},
+                              {'label': '库存清零', 'value': '1'},
+                            ],
+                            onSelected: (v) => setState(() => _clearflag = v),
+                          ),
+                          disabled: disabled,
                         ),
-                        disabled: disabled,
-                      ),
-                      _buildDivider(),
+                        _buildDivider(),
+                      ],
+                      // Legacy openflag row hidden from UI (align lxAss), kept commented for reference
+                      // _buildSelectRow(
+                      //   label: '盘点类型',
+                      //   value: _openflag == '1' ? '营业中盘点' : '停业盘点',
+                      //   onTap: () => _showOptionSheet(
+                      //     title: '选择盘点类型',
+                      //     currentValue: _openflag,
+                      //     options: [
+                      //       {'label': '营业中盘点', 'value': '1'},
+                      //       {'label': '停业盘点', 'value': '0'},
+                      //     ],
+                      //     onSelected: (v) => setState(() => _openflag = v),
+                      //   ),
+                      //   disabled: disabled,
+                      // ),
+                      // _buildDivider(),
                       _buildSelectRow(
                         label: '盘点类型',
-                        value: _openflag == '1' ? '营业中盘点' : '停业盘点',
-                        onTap: () => _showOptionSheet(
-                          title: '选择盘点类型',
-                          currentValue: _openflag,
-                          options: [
-                            {'label': '营业中盘点', 'value': '1'},
-                            {'label': '停业盘点', 'value': '0'},
-                          ],
-                          onSelected: (v) => setState(() => _openflag = v),
-                        ),
-                        disabled: disabled,
-                      ),
-                      _buildDivider(),
-                      _buildSelectRow(
-                        label: '盘点范围',
                         value: _checktypeName(_checktype),
                         onTap: _showChecktypeSheet,
                         disabled: disabled,
                       ),
                       _buildDivider(),
+                      // Lock fields are only visible for full inventory (align lxAss: checktype == 1)
+                      if (_checktype == 1) ...[
+                        _buildSelectRow(
+                          label: '锁定方式',
+                          value: _lockmodeName(_lockmode),
+                          onTap: () => _showOptionSheet(
+                            title: '选择锁定方式',
+                            currentValue: _lockmode.toString(),
+                            options: [
+                              {'label': '系统立即锁定', 'value': '1'},
+                              {'label': '人工手动锁定', 'value': '2'},
+                            ],
+                            onSelected: (v) => setState(() {
+                              _lockmode = int.tryParse(v) ?? 2;
+                              // System immediate lock forces lock status to locked (align lxAss)
+                              if (_lockmode == 1) {
+                                _lockflag = 1;
+                              }
+                            }),
+                          ),
+                          // Editable only when creating a new plan (align lxAss: !query.billid)
+                          disabled: disabled || _isEdit,
+                          required: true,
+                          onInfoTap: _showLockmodeTip,
+                        ),
+                        _buildDivider(),
+                        _buildSelectRow(
+                          label: '锁定状态',
+                          value: _lockflagName(_lockflag),
+                          onTap: () => _showOptionSheet(
+                            title: '选择锁定状态',
+                            currentValue: _lockflag.toString(),
+                            options: [
+                              {'label': '暂不锁定', 'value': '0'},
+                              {'label': '立即锁定', 'value': '1'},
+                            ],
+                            onSelected: (v) => setState(() => _lockflag = int.tryParse(v) ?? 0),
+                          ),
+                          // Editable only for new plan under manual lock mode (align lxAss: lockmode != 1)
+                          disabled: disabled || _isEdit || _lockmode == 1,
+                          required: true,
+                          onInfoTap: _showLockflagTip,
+                        ),
+                        _buildDivider(),
+                      ],
                       _buildInputRow(label: '备注', controller: _remarkCtrl, disabled: disabled),
                     ]),
                   ),
@@ -751,6 +902,13 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
             ),
       bottomNavigationBar: _buildBottomBar(disabled),
     );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
+    );
   }
 
   Widget _buildBottomBar(bool disabled) {
@@ -772,7 +930,7 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
         if (!_isEdit) ...[
           Expanded(
             child: GestureDetector(
-              onTap: _submitting ? null : _save,
+              onTap: _submitting ? null : () => _save(),
               child: Container(
                 height: 42,
                 decoration: BoxDecoration(
@@ -822,7 +980,7 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
           const SizedBox(width: 16),
           Expanded(
             child: GestureDetector(
-              onTap: _submitting ? null : _save,
+              onTap: _submitting ? null : () => _save(),
               child: Container(
                 height: 42,
                 decoration: BoxDecoration(
@@ -990,6 +1148,8 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
           isSelect: true,
           isMultiSelect: true,
           initialSelectedIds: selectedIds,
+          // 与 zmProMax 盘点计划一致：勾父级连带勾选全部子级，勾子级不向上勾选父级
+          manualParentCheck: true,
         ),
       ),
     );
@@ -1181,6 +1341,7 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
     required VoidCallback onTap,
     bool disabled = false,
     bool required = false,
+    VoidCallback? onInfoTap,
   }) {
     return GestureDetector(
       onTap: disabled ? null : onTap,
@@ -1198,7 +1359,25 @@ class _InventoryPlanAddPageState extends State<InventoryPlanAddPage>
           ),
           SizedBox(
             width: 84,
-            child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFF333333))),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(label,
+                      style: const TextStyle(fontSize: 14, color: Color(0xFF333333)),
+                      overflow: TextOverflow.ellipsis),
+                ),
+                // Info icon always tappable even when the row is not editable (align lxAss labelIconTap)
+                if (onInfoTap != null) ...[
+                  const SizedBox(width: 3),
+                  GestureDetector(
+                    onTap: onInfoTap,
+                    behavior: HitTestBehavior.opaque,
+                    child: const Icon(Icons.error, size: 14, color: Color(0xFFD54B5A)),
+                  ),
+                ],
+              ],
+            ),
           ),
           const SizedBox(width: 8),
           Expanded(

@@ -7,6 +7,7 @@ import 'package:flutter_deer/net/http_helper.dart';
 import 'package:flutter_deer/pages/business/inventory/quickcheck/add.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/review_nav_state.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
@@ -50,7 +51,8 @@ class _InventoryQuickcheckListPageState extends State<InventoryQuickcheckListPag
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _statusIndex = ReviewNavState.consumePendingStatusIndex();
+    _tabController = TabController(length: 4, vsync: this, initialIndex: _statusIndex);
     _tabController.addListener(() {
       if (!_tabController.indexIsChanging) {
         setState(() {
@@ -594,7 +596,12 @@ class _InventoryQuickcheckListPageState extends State<InventoryQuickcheckListPag
                       indicatorColor: const Color(0xFF006EFF),
                       labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                       unselectedLabelStyle: const TextStyle(fontSize: 14),
-                      tabs: const [Tab(text: '全部'), Tab(text: '待审核'), Tab(text: '已审核'), Tab(text: '已驳回')]),
+                      tabs: const [
+                        Tab(text: '全部'),
+                        Tab(text: '待审核'),
+                        Tab(text: '已审核'),
+                        Tab(text: '已驳回')
+                      ]),
                 ]))),
       ),
       body: RefreshIndicator(
@@ -691,8 +698,7 @@ class _QuickcheckCard extends StatelessWidget {
                           style: const TextStyle(
                               fontSize: 15, fontWeight: FontWeight.w700, color: Color(0xFF111827)),
                           overflow: TextOverflow.ellipsis)),
-                  Text(
-                      isSigned ? '已审核' : (isRejected ? '已驳回' : '待审核'),
+                  Text(isSigned ? '已审核' : (isRejected ? '已驳回' : '待审核'),
                       style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w500,

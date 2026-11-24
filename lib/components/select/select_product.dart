@@ -4,12 +4,14 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_deer/components/select/select_batch.dart';
 import 'package:flutter_deer/components/select/select_mult_batch.dart';
+import 'package:flutter_deer/components/select/select_unit_size.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/routers/fluro_navigator.dart';
 import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/math_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
@@ -37,6 +39,9 @@ class SelectProductPage extends StatefulWidget {
     this.amtQtyDecimals = 2,
     this.showSelectedCount = false,
     this.selectMax,
+    this.sizeUseIncounterid = false,
+    this.apiUrl,
+    this.unitMatch = false,
   });
   final int? storeid;
   final String? counterid;
@@ -98,6 +103,18 @@ class SelectProductPage extends StatefulWidget {
   /// 对齐小程序 selectMax（兑奖换购等场景传 5）
   final int? selectMax;
 
+  /// 规格/单位查询是否用 incounterid（调入仓库）替代 counterid。
+  /// 仅调拨申请单（allot_apply）传 true；其余页面默认 false 走 counterid，行为不受影响。
+  final bool sizeUseIncounterid;
+
+  /// 商品列表接口地址，默认 [HttpApi.productGetList]。
+  /// 货位管理绑定商品需要按包装单位查询，传 [HttpApi.productGetProductUnitList]。
+  final String? apiUrl;
+
+  /// 包装单位匹配开关（对齐小程序 selectProduct.vue 的 unitmatch）：
+  /// 开启后已选/回显按 productid+unitonlyid 复合键匹配，避免同一商品的其他包装单位被误标为已选
+  final bool unitMatch;
+
   @override
   State<SelectProductPage> createState() => _SelectProductPageState();
 }
@@ -135,11 +152,13 @@ class _SelectProductPageState extends State<SelectProductPage> {
 
   /// 已选总金额：Σ(单价 × 数量)，单价取值对齐 _getPrice
   /// （cgpriceflag 取 cgprice||price，cgprice 为空或为 0 时回退档案进价 price，
-  /// pspriceflag 取 lspsprice||price，否则 sellprice||price）
+  /// pspriceflag 取 lspsprice||price，pfpriceflag 取行价格 price（对齐 zmProMax defValSet），
+  /// 否则 sellprice||price）
   /// formatDecimal(3) 对齐 Vue getAmt
   String get _totalAmtText {
     final cgpriceflag = widget.mergData?['cgpriceflag']?.toString() == '1';
     final pspriceflag = widget.mergData?['pspriceflag']?.toString() == '1';
+    final pfpriceflag = widget.mergData?['pfpriceflag']?.toString() == '1';
     double sum = 0;
     for (final item in _selectedItems) {
       final qty = double.tryParse(item['qty']?.toString() ?? '0') ?? 0;
@@ -148,6 +167,8 @@ class _SelectProductPageState extends State<SelectProductPage> {
         priceText = _cgPriceText(item, fallback: '0');
       } else if (pspriceflag) {
         priceText = item['lspsprice']?.toString() ?? item['price']?.toString() ?? '0';
+      } else if (pfpriceflag) {
+        priceText = item['price']?.toString() ?? '0';
       } else {
         priceText = item['sellprice']?.toString() ?? item['price']?.toString() ?? '0';
       }
@@ -280,11 +301,15 @@ class _SelectProductPageState extends State<SelectProductPage> {
     setState(() => _loading = true);
     final typeid = _effectiveTypeId;
     final isCostChange = widget.paramJust?.contains('newcostprice') ?? false;
-    return request(HttpApi.productGetList, {
+    // 盘点类单据（预盘单 ypd / 快速盘点单 kspd）不传 cgpriceflag：
+    // 对齐 lxAss filterChecktype（mergData 只带 storeid/counterid/planid/billtypeflag/needbatchflag/stockflag）。
+    // 传 cgpriceflag=1 时后端按采购口径返回 stockqty（全店库存），多批次商品会与盘点柜库存不一致
+    final isInventoryBill = widget.billtypeflag == 'ypd' || widget.billtypeflag == 'kspd';
+    return request(widget.apiUrl ?? HttpApi.productGetList, {
       'stockflag': 1,
       'storeid': widget.storeid ?? '',
       if (!isCostChange) 'counterid': widget.counterid ?? '',
-      if (!isCostChange) 'cgpriceflag': 1,
+      if (!isCostChange && !isInventoryBill) 'cgpriceflag': 1,
       if (!isCostChange) 'billsupid': widget.billsupid ?? '',
       if (!isCostChange) 'itemstatusin': '1,2',
       if (!isCostChange) 'itemtypenot': '5,8',
@@ -314,6 +339,17 @@ class _SelectProductPageState extends State<SelectProductPage> {
       final data = result['data'];
       final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
       final rows = list.cast<Map<String, dynamic>>();
+      // 调拨出库单（mergData.dbpriceflag=1）：后端返回调拨价 dbprice，非 0 时覆盖配送价 lspsprice，
+      // 作为选品页展示与取价来源（对齐 Vue selectProduct dbck：lspsprice = dbprice || lspsprice || 0）；
+      // dbprice 为 0 时保留原 lspsprice，取价行为不变。仅调拨出库单传该标识，其余单据不受影响。
+      if (widget.mergData?['dbpriceflag']?.toString() == '1') {
+        for (final row in rows) {
+          final dbPrice = double.tryParse(row['dbprice']?.toString() ?? '') ?? 0;
+          if (dbPrice != 0) {
+            row['lspsprice'] = row['dbprice'].toString();
+          }
+        }
+      }
       setState(() {
         if (_page == 1) {
           _list = rows;
@@ -383,12 +419,21 @@ class _SelectProductPageState extends State<SelectProductPage> {
   }
 
   // ─── 已选商品查找工具方法 ─────────────────────────────────────
+  /// 商品匹配键：unitMatch（货位绑定商品）开启时按 productid+unitonlyid 复合键匹配，
+  /// 避免同一商品的其他包装单位被误标为已选；其余场景保持 productid 匹配。productid 为空时返回 null
+  String? _matchKey(Map<String, dynamic> item) {
+    final String productId = item['productid']?.toString() ?? '';
+    if (productId.isEmpty) return null;
+    if (!widget.unitMatch) return productId;
+    return '$productId|${item['unitonlyid']?.toString() ?? ''}';
+  }
+
   /// 获取商品在已选列表中的索引，-1 表示未选
   int _findSelectedIndex(Map<String, dynamic> item) {
-    final productId = item['productid']?.toString() ?? '';
-    if (productId.isEmpty) return -1;
+    final String? key = _matchKey(item);
+    if (key == null) return -1;
     for (int i = 0; i < _selectedItems.length; i++) {
-      if (_selectedItems[i]['productid']?.toString() == productId) return i;
+      if (_matchKey(_selectedItems[i]) == key) return i;
     }
     return -1;
   }
@@ -421,11 +466,14 @@ class _SelectProductPageState extends State<SelectProductPage> {
         _selectedItems[idx]['_amtManual'] = false;
         // 同步重算 amt（对齐 _confirm 补全逻辑）
         final cgpriceflag = widget.mergData?['cgpriceflag']?.toString() == '1';
+        final pfpriceflag = widget.mergData?['pfpriceflag']?.toString() == '1';
         final priceText = cgpriceflag
             ? _cgPriceText(_selectedItems[idx], fallback: '0')
-            : (_selectedItems[idx]['sellprice']?.toString() ??
-                _selectedItems[idx]['price']?.toString() ??
-                '0');
+            : pfpriceflag
+                ? (_selectedItems[idx]['price']?.toString() ?? '0')
+                : (_selectedItems[idx]['sellprice']?.toString() ??
+                    _selectedItems[idx]['price']?.toString() ??
+                    '0');
         final amtPrice = double.tryParse(priceText) ?? 0;
         _selectedItems[idx]['amt'] = MathUtils.formatDecimalNum(3, MathUtils.mul(newQty, amtPrice));
       });
@@ -488,10 +536,9 @@ class _SelectProductPageState extends State<SelectProductPage> {
         _selectedItems.clear();
         _selectedItems.add(result);
       });
-    } else {
-      // 已选中 → 取消选中
-      setState(() => _selectedItems.removeAt(idx));
     }
+    // 已选中项再次点击不取消（对齐小程序 radio：单选不可通过再次点击取消），
+    // 避免返回空选择导致调用方（如货位绑定）残留旧商品数据
   }
 
   /// 复选框模式：判断商品是否已选中
@@ -501,12 +548,26 @@ class _SelectProductPageState extends State<SelectProductPage> {
 
   // ─── 商品字段工具方法 ─────────────────────────────────────
   String _getProductName(Map<String, dynamic> item) {
-    return item['productname']?.toString() ?? item['name']?.toString() ?? '-';
+    final String name = item['productname']?.toString() ?? item['name']?.toString() ?? '-';
+    // 货位绑定等包装单位列表：名称拼接全角包装单位，与后端保存后 productname「商品名（单位）」口径及小程序展示保持一致
+    if (_isUnitList) {
+      final String unit = _getUnit(item);
+      if (unit.isNotEmpty && !name.contains('（$unit）') && !name.contains('($unit)')) {
+        return '$name（$unit）';
+      }
+    }
+    return name;
   }
 
+  /// 单位：优先取 unit，为空时回退 unitname（getProductUnitList 的 unit 可能为空串）
   String _getUnit(Map<String, dynamic> item) {
-    return item['unit']?.toString() ?? '';
+    final String unit = item['unit']?.toString() ?? '';
+    return unit.isNotEmpty ? unit : (item['unitname']?.toString() ?? '');
   }
+
+  /// 货位绑定等包装单位列表接口：不返回库存/价格，卡片隐藏库存价格行、改展示单位行
+  /// （对齐小程序 selectProduct.vue 的 hideStock/hidePrice + 单位副标题）
+  bool get _isUnitList => (widget.apiUrl ?? '').contains('getProductUnitList');
 
   String _getSpec(Map<String, dynamic> item) {
     return item['spec']?.toString() ??
@@ -531,12 +592,29 @@ class _SelectProductPageState extends State<SelectProductPage> {
     return fallback;
   }
 
+  /// 批发模块取价（对齐 zmProMax 单据 defValSet 规则）：
+  /// price = custdiscountprice > 0 ? custdiscountprice : (custprice ?? price)
+  String _defValPriceText(Map<String, dynamic> item, {String fallback = '0.00'}) {
+    final cdd = double.tryParse(item['custdiscountprice']?.toString() ?? '') ?? 0;
+    if (cdd > 0) return item['custdiscountprice'].toString();
+    final cpRaw = item['custprice'];
+    if (cpRaw != null && cpRaw.toString().isNotEmpty) return cpRaw.toString();
+    return item['price']?.toString() ?? fallback;
+  }
+
   String _getPrice(Map<String, dynamic> item) {
     // 对齐 lxAss: cgpriceflag 模式下取 cgprice，否则取 sellprice（默认）
     final cgpriceflag = widget.mergData?['cgpriceflag']?.toString() == '1';
     if (cgpriceflag) {
       // 对齐小程序：cgprice 为空或为 0 时回退档案进价 price
       return _cgPriceText(item);
+    }
+    // 批发模块（pfpriceflag=1）：取价对齐 zmProMax defValSet：
+    // custdiscountprice > 0 ? custdiscountprice : (custprice ?? price)
+    // （业务后台批发单显示 2.25，此前误用 sellprice/零售价导致显示 240）
+    final pfpriceflag = widget.mergData?['pfpriceflag']?.toString() == '1';
+    if (pfpriceflag) {
+      return _defValPriceText(item);
     }
     // 配送价模式（连锁模块单据：pspriceflag=1 时取 lspsprice 配送价）
     final pspriceflag = widget.mergData?['pspriceflag']?.toString() == '1';
@@ -594,7 +672,12 @@ class _SelectProductPageState extends State<SelectProductPage> {
       'is_page': 1,
     };
     if (type == 'size') {
-      params['counterid'] = mergData['counterid']?.toString() ?? '';
+      // 仅调拨申请单（sizeUseIncounterid=true）用 incounterid（调入仓库）；其余页面走 counterid，行为不变
+      if (widget.sizeUseIncounterid) {
+        params['incounterid'] = mergData['incounterid']?.toString() ?? '';
+      } else {
+        params['counterid'] = mergData['counterid']?.toString() ?? '';
+      }
     }
 
     return _showExtendOptionsWithParams(type, params);
@@ -768,7 +851,7 @@ class _SelectProductPageState extends State<SelectProductPage> {
   void _showPurchaseDetail(Map<String, dynamic> item) {
     final name = _getProductName(item);
     final barcode = _getBarcode(item);
-    final stock = _getStock(item);
+    var stock = _getStock(item);
     final price = _getPrice(item);
     final retailPrice = _getRetailPrice(item);
     final shelves = _getShelves(item);
@@ -783,8 +866,21 @@ class _SelectProductPageState extends State<SelectProductPage> {
     var currentSize = existItem?['size']?.toString() ?? _getSize(item);
     var currentRemark = existItem?['remark']?.toString() ?? item['remark']?.toString() ?? '';
     var editBatchno = existItem?['batchno']?.toString() ?? item['batchno']?.toString() ?? '';
-    var editBirthdate = existItem?['birthdate']?.toString() ?? item['birthdate']?.toString() ?? '';
-    var editValiddate = existItem?['validdate']?.toString() ?? item['validdate']?.toString() ?? '';
+    // 日期字段统一按 YYYY-MM-DD 展示，隐藏时分秒（对齐 Vue）
+    var editBirthdate = _formatBatchDate(
+        existItem?['birthdate']?.toString() ?? item['birthdate']?.toString() ?? '');
+    var editValiddate = _formatBatchDate(
+        existItem?['validdate']?.toString() ?? item['validdate']?.toString() ?? '');
+    double? editStockqty =
+        double.tryParse((existItem?['stockqty'] ?? item['stockqty'])?.toString() ?? '');
+    if (cgpriceflag && editStockqty != null) {
+      stock = MathUtils.formatDecimal(1, editStockqty);
+    }
+    // 不管理有效期的商品禁止录入批次和日期（参数：purchase.nobatchproductbnxr）：
+    // 参数开启且商品档案 validflag==0 时，批次/生产日期/有效日期选择入口禁用，
+    // 已录入数据由各单据保存校验统一拦截（对齐 Vue proDetails.vue isNoBatchProduct）
+    final bool noBatchProductInput = _loginParamInt('nobatchproductbnxr') == 1 &&
+        (existItem?['validflag']?.toString() ?? item['validflag']?.toString() ?? '1') == '0';
     // 数量支持小数（对齐小程序 qty 可为小数：instore formatDecimal(1)/cgorder formatDecimal(2)）
     double qty = existItem != null ? (double.tryParse(existItem['qty']?.toString() ?? '') ?? 1) : 1;
     double giftQty =
@@ -975,6 +1071,8 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                   item['sizeonlyid'] =
                                                       item['_mainSizeonlyid']?.toString() ?? '';
                                                 }
+                                                // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+                                                syncUnitProductName(item, result, unitonlyid: uid);
                                                 // cgpriceflag 模式：selectUnitFn 价格逻辑
                                                 if (cgpriceflag) {
                                                   final cgprice = result['cgprice']?.toString();
@@ -1092,59 +1190,102 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                 }),
                                 const SizedBox(height: 12),
                                 // 商品批次（使用 SelectBatchSheet 选择，带出日期）
+                                // 不管理有效期的商品禁止录入批次（参数：purchase.nobatchproductbnxr）
                                 _buildSelectField(
                                     '商品批次', editBatchno.isNotEmpty ? editBatchno : '请选择',
-                                    onTap: () async {
-                                  final productid = item['productid']?.toString() ??
-                                      item['prodid']?.toString() ??
-                                      '';
-                                  if (productid.isEmpty) {
-                                    Toast.show('商品信息异常');
-                                    return;
-                                  }
-                                  final batchResult =
-                                      await showModalBottomSheet<Map<String, dynamic>>(
-                                    context: ctx,
-                                    isScrollControlled: true,
-                                    backgroundColor: Colors.transparent,
-                                    builder: (_) => SelectBatchSheet(
-                                      productid: productid,
-                                      bsid: (widget.storeid ?? '').toString(),
-                                      counterid: widget.counterid ?? '',
-                                      initialBatchNo: editBatchno,
-                                    ),
-                                  );
-                                  if (batchResult != null) {
-                                    setDialogState(() {
-                                      editBatchno = batchResult['batchno']?.toString() ?? '';
-                                      // 选择批次后自动带出生产日期和有效期（对齐 web handleBatchConfirm）
-                                      editBirthdate = _formatBatchDate(batchResult['birthdate']);
-                                      final bd = editBirthdate.isNotEmpty ? editBirthdate : '';
-                                      editValiddate = _formatBatchDate(batchResult['validdate']);
-                                      if (editValiddate.isEmpty && bd.isNotEmpty) {
-                                        editValiddate = bd;
-                                      }
-                                    });
-                                  }
-                                }),
+                                    onTap: noBatchProductInput
+                                        ? null
+                                        : () async {
+                                            final productid = item['productid']?.toString() ??
+                                                item['prodid']?.toString() ??
+                                                '';
+                                            if (productid.isEmpty) {
+                                              Toast.show('商品信息异常');
+                                              return;
+                                            }
+                                            final batchResult =
+                                                await showModalBottomSheet<Map<String, dynamic>>(
+                                              context: ctx,
+                                              isScrollControlled: true,
+                                              backgroundColor: Colors.transparent,
+                                              builder: (_) => SelectBatchSheet(
+                                                productid: productid,
+                                                bsid: (widget.storeid ?? '').toString(),
+                                                counterid: widget.counterid ?? '',
+                                                initialBatchNo: editBatchno,
+                                              ),
+                                            );
+                                            if (batchResult != null) {
+                                              setDialogState(() {
+                                                editBatchno =
+                                                    batchResult['batchno']?.toString() ?? '';
+                                                if (cgpriceflag) {
+                                                  final batchStockqty = MathUtils.formatDecimalNum(
+                                                      1,
+                                                      double.tryParse(
+                                                              batchResult['stockqty']?.toString() ??
+                                                                  '') ??
+                                                          0);
+                                                  editStockqty = batchStockqty;
+                                                  stock = MathUtils.formatDecimal(1, batchStockqty);
+                                                }
+                                                // 选择批次后自动带出生产日期和有效期（对齐 web handleBatchConfirm）
+                                                editBirthdate =
+                                                    _formatBatchDate(batchResult['birthdate']);
+                                                final bd =
+                                                    editBirthdate.isNotEmpty ? editBirthdate : '';
+                                                editValiddate =
+                                                    _formatBatchDate(batchResult['validdate']);
+                                                if (editValiddate.isEmpty && bd.isNotEmpty) {
+                                                  editValiddate = bd;
+                                                }
+                                              });
+                                            }
+                                          }),
                                 const SizedBox(height: 12),
                                 // 生产日期
                                 _buildSelectField(
                                     '生产日期', editBirthdate.isNotEmpty ? editBirthdate : '请选择',
-                                    onTap: () {
-                                  _pickInventoryDate(ctx, editBirthdate).then((v) {
-                                    if (v != null) setDialogState(() => editBirthdate = v);
-                                  });
-                                }),
+                                    // 不管理有效期的商品禁止录入日期（参数：purchase.nobatchproductbnxr）
+                                    onTap: noBatchProductInput
+                                        ? null
+                                        : () {
+                                            _pickInventoryDate(ctx, editBirthdate).then((v) {
+                                              if (v == null) return;
+                                              // 保质期商品且有效日期为空时按 validday 正向填充（对齐 Vue
+                                              // handleBillBirthdate 防覆盖：有效日期已有值则保留）
+                                              final link = editValiddate.isEmpty
+                                                  ? _calcLinkedDate(v, existItem ?? item,
+                                                      isBirthdate: true)
+                                                  : '';
+                                              setDialogState(() {
+                                                editBirthdate = v;
+                                                if (link.isNotEmpty) editValiddate = link;
+                                              });
+                                            });
+                                          }),
                                 const SizedBox(height: 12),
                                 // 有效日期
                                 _buildSelectField(
                                     '有效日期', editValiddate.isNotEmpty ? editValiddate : '请选择',
-                                    onTap: () {
-                                  _pickInventoryDate(ctx, editValiddate).then((v) {
-                                    if (v != null) setDialogState(() => editValiddate = v);
-                                  });
-                                }),
+                                    // 不管理有效期的商品禁止录入日期（参数：purchase.nobatchproductbnxr）
+                                    onTap: noBatchProductInput
+                                        ? null
+                                        : () {
+                                            _pickInventoryDate(ctx, editValiddate).then((v) {
+                                              if (v == null) return;
+                                              // 保质期商品且生产日期为空时按 validday 反算填充（对齐 Vue
+                                              // handleBillBirthdate 防覆盖：生产日期已有值则保留）
+                                              final link = editBirthdate.isEmpty
+                                                  ? _calcLinkedDate(v, existItem ?? item,
+                                                      isBirthdate: false)
+                                                  : '';
+                                              setDialogState(() {
+                                                editValiddate = v;
+                                                if (link.isNotEmpty) editBirthdate = link;
+                                              });
+                                            });
+                                          }),
                                 const SizedBox(height: 12),
                                 _buildRemarkRow('备注', currentRemark, onChanged: (v) {
                                   setDialogState(() => currentRemark = v);
@@ -1193,6 +1334,9 @@ class _SelectProductPageState extends State<SelectProductPage> {
                               result['batchno'] = editBatchno;
                               result['birthdate'] = editBirthdate;
                               result['validdate'] = editValiddate;
+                              if (cgpriceflag && editStockqty != null) {
+                                result['stockqty'] = editStockqty;
+                              }
                               // 价格/零售价/小计金额（可编辑，对齐 Vue proDetails.vue price/sellprice/amt）
                               final confirmPrice = double.tryParse(priceController.text) ?? 0;
                               final confirmSellprice =
@@ -1396,6 +1540,8 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                   item['sizeonlyid'] =
                                                       item['_mainSizeonlyid']?.toString() ?? '';
                                                 }
+                                                // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+                                                syncUnitProductName(item, result, unitonlyid: uid);
                                                 // lxAss selectUnitFn(cgpriceflag=false) → price = custprice
                                                 final p = result['custprice']?.toString();
                                                 if (p != null) {
@@ -1452,8 +1598,15 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                     result['_id']?.toString() ??
                                                     '';
                                                 if (sid.isNotEmpty) item['sizeonlyid'] = sid;
-                                                // lxAss selectSizeFn(pricetype="sellprice") → price = sellprice
-                                                final p = result['sellprice']?.toString();
+                                                // 规格切换价格：批发模块对齐 zmProMax changeSize（price = custprice），
+                                                // 非批发模块保持 lxAss selectSizeFn（price = sellprice）
+                                                final bool isPf =
+                                                    widget.mergData?['pfpriceflag']?.toString() ==
+                                                        '1';
+                                                final p = isPf
+                                                    ? (result['custprice']?.toString() ??
+                                                        result['sellprice']?.toString())
+                                                    : result['sellprice']?.toString();
                                                 if (p != null) {
                                                   priceController.text = p;
                                                 }
@@ -1521,7 +1674,6 @@ class _SelectProductPageState extends State<SelectProductPage> {
                               result['unit'] = currentUnit;
                               result['size'] = currentSize;
                               result['price'] = curPrice;
-                              result['pfprice1'] = curPrice;
                               result['amt'] = subtotal;
                               result['remark'] = currentRemark;
                               Navigator.pop(ctx);
@@ -1568,24 +1720,49 @@ class _SelectProductPageState extends State<SelectProductPage> {
     final qtyLabel = isYpd ? '预盘数量' : '盘点数量';
     // 数量字段名（对齐 lxAss qtyTypeFn：预盘单 precheckqty / 快速盘点 checkqty）
     final qtyType = isYpd ? 'precheckqty' : 'checkqty';
-    // 多批次多选仅对预盘单/快速盘点生效（对齐 lxAss chosePc 仅 preOrder/quickInven 模块），其他单据不启用
-    final enableMultBatch = (isYpd || isKspd) && item['morebatchflag']?.toString() == '1';
+    // 多批次商品（批次行点击可主动跳转多批次页，对齐 lxAss chosePc(isManual)：morebatchflag==1 即可）
+    // 系统参数「盘点不管理批次」开启时批次已合并，不再展开多批次选择
+    final moreBatch =
+        (isYpd || isKspd) && item['morebatchflag']?.toString() == '1' && !_checkAllBatch;
+    // validflag==1：数量入口强制跳转多批次（箭头组件；对齐 lxAss proDetails 数量可点击条件）
+    final enableMultBatch = moreBatch && item['validflag']?.toString() == '1';
 
     final name = _getProductName(item);
-    final barcode = _getBarcode(item);
+    var barcode = _getBarcode(item);
     final stock = _getStock(item);
-    final costPrice = item['costprice']?.toString() ?? '0';
-    final shelves = _getShelves(item);
-    final stockqty = double.tryParse(item['stockqty']?.toString() ?? stock) ?? 0;
+    var costPrice = item['costprice']?.toString() ?? '0';
+    var shelves = _getShelves(item);
+    // 现库存展示口径：不管理批次取商品总库存 allstockqty，否则取批次库存 stockqty
+    // （对齐 lxAss proDetails：checkAllBatch ? allstockqty : stockqty）
+    var stockqty = _checkAllBatch
+        ? (double.tryParse(item['allstockqty']?.toString() ?? '') ?? 0)
+        : (double.tryParse(item['stockqty']?.toString() ?? stock) ?? 0);
 
     final existIdx = _findSelectedIndex(item);
     final existItem = existIdx >= 0 ? _selectedItems[existIdx] : null;
 
-    final currentUnit = existItem?['unit']?.toString() ?? _getUnit(item);
-    final currentSize = existItem?['size']?.toString() ?? _getSize(item);
+    var currentUnit = existItem?['unit']?.toString() ?? _getUnit(item);
+    var currentSize = existItem?['size']?.toString() ?? _getSize(item);
+    // 已确认过的单位/规格（含单位/规格 ID）回写商品行，保证弹窗与明细一致
+    // （对齐 lxAss selectProduct.editFn：已选商品优先使用 selectList 中的数据）
+    if (existItem != null) {
+      for (final key in const [
+        'unit',
+        'unitonlyid',
+        'size',
+        'sizeonlyid',
+        'packagenum',
+      ]) {
+        final v = existItem[key];
+        if (v != null && v.toString().isNotEmpty) item[key] = v;
+      }
+    }
+    // 记录主规格：选包装单位后规格回退（对齐 lxAss proDetails.vue openFn sizeRevert）
+    SelectUnitSizeSheet.initMainSize(item);
     // 已确认过的多批次选择回显：从商品数据 batchList 恢复（对齐 lxAss proItem.batchList 持久化）
+    // 系统参数「盘点不管理批次」开启时批次已合并，忽略历史 batchList
     final savedBatchList = existItem?['batchList'] ?? item['batchList'];
-    if (savedBatchList is List) {
+    if (!_checkAllBatch && savedBatchList is List) {
       multBatchList = savedBatchList
           .whereType<Map<String, dynamic>>()
           .map((e) => Map<String, dynamic>.from(e))
@@ -1598,10 +1775,15 @@ class _SelectProductPageState extends State<SelectProductPage> {
             .where((s) => s.isNotEmpty)
             .join(',')
         : (existItem?['batchno']?.toString() ?? item['batchno']?.toString() ?? '');
-    var editBirthdate = existItem?['birthdate']?.toString() ?? item['birthdate']?.toString() ?? '';
-    var editValiddate = existItem?['validdate']?.toString() ?? item['validdate']?.toString() ?? '';
+    // 日期字段统一按 YYYY-MM-DD 展示，隐藏时分秒（对齐 Vue）
+    var editBirthdate = _formatBatchDate(
+        existItem?['birthdate']?.toString() ?? item['birthdate']?.toString() ?? '');
+    var editValiddate = _formatBatchDate(
+        existItem?['validdate']?.toString() ?? item['validdate']?.toString() ?? '');
     var editSupid = existItem?['supid']?.toString() ?? item['supid']?.toString() ?? '';
     var editRemark = existItem?['remark']?.toString() ?? item['remark']?.toString() ?? '';
+    // 批次输入框（对齐 lxAss proDetails manualBatchInput：预盘/快速盘点批次放开手动输入）
+    final batchCtrl = TextEditingController(text: editBatchno);
     double editQty;
     if (multBatchList.isNotEmpty) {
       // 多批次回显：数量为各批次数量总和（对齐 lxAss onSelectMultBatch totalQty）
@@ -1680,6 +1862,7 @@ class _SelectProductPageState extends State<SelectProductPage> {
                               .map((e) => e['batchno']?.toString() ?? '')
                               .where((s) => s.isNotEmpty)
                               .join(',');
+                          batchCtrl.text = editBatchno;
                           // 单选批次时带回生产/有效日期，多条时清空（对齐 lxAss onSelectMultBatch）
                           if (multResult.length == 1) {
                             editBirthdate = _formatBatchDate(multResult.first['birthdate']);
@@ -1699,7 +1882,8 @@ class _SelectProductPageState extends State<SelectProductPage> {
 
                     final profitLoss = editQty - stockqty;
                     // 多批次且选中多条批次时隐藏生产/有效日期（对齐 lxAss：!(morebatchflag==1 && batchList.length>1)）
-                    final hideDateRows = enableMultBatch && multBatchList.length > 1;
+                    // 系统参数「盘点不管理批次」开启时批次已合并，生产/有效日期整块隐藏（对齐 lxAss myParam）
+                    final hideDateRows = _checkAllBatch || (moreBatch && multBatchList.length > 1);
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -1716,54 +1900,125 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                 const SizedBox(height: 12),
                                 const Divider(color: Color(0xFFE5E7EB)),
                                 const SizedBox(height: 12),
-                                // 单位（只读）
-                                _buildInfoRow('单位', currentUnit.isNotEmpty ? currentUnit : '-'),
-                                const SizedBox(height: 8),
-                                // 规格（只读）
-                                _buildInfoRow('规格', currentSize.isNotEmpty ? currentSize : '-'),
-                                const SizedBox(height: 12),
-                                // 批次（多批次商品跳多选页，单选批次用 SelectBatchSheet，带出日期）
-                                _buildSelectField(
-                                    '批次', editBatchno.isNotEmpty ? editBatchno : '请选择',
-                                    onTap: () async {
-                                  final productid = item['productid']?.toString() ??
-                                      item['prodid']?.toString() ??
-                                      '';
-                                  if (productid.isEmpty) {
-                                    Toast.show('商品信息异常');
-                                    return;
-                                  }
-                                  // 多批次商品：弹多批次选择（对齐 lxAss proDetails chosePc）
-                                  if (enableMultBatch) {
-                                    await openMultBatch();
-                                    return;
-                                  }
-                                  final batchResult =
-                                      await showModalBottomSheet<Map<String, dynamic>>(
-                                    context: ctx,
-                                    isScrollControlled: true,
-                                    backgroundColor: Colors.transparent,
-                                    builder: (_) => SelectBatchSheet(
-                                      productid: productid,
+                                // 单位（预盘单可选，对齐 lxAss proDetails.vue；快速盘点不开放）
+                                if (isYpd && SelectUnitSizeSheet.canSelectUnit(item))
+                                  _buildSelectField(
+                                      '单位', currentUnit.isNotEmpty ? currentUnit : '请选择',
+                                      onTap: () async {
+                                    final result = await SelectUnitSizeSheet.show(
+                                      ctx,
+                                      type: 'unit',
+                                      item: item,
                                       bsid: (widget.storeid ?? '').toString(),
                                       counterid: widget.counterid ?? '',
-                                      initialBatchNo: editBatchno,
-                                    ),
-                                  );
-                                  if (batchResult != null) {
+                                    );
+                                    if (result == null) return;
+                                    await SelectUnitSizeSheet.apply(item,
+                                        type: 'unit',
+                                        result: result,
+                                        bsid: (widget.storeid ?? '').toString(),
+                                        counterid: widget.counterid ?? '',
+                                        // 库存回写口径：不管理批次写商品总库存 allstockqty，否则写批次库存 stockqty
+                                        stockAllBatch: _checkAllBatch);
+                                    if (!ctx.mounted) return;
                                     setDialogState(() {
-                                      editBatchno = batchResult['batchno']?.toString() ?? '';
-                                      // 选择批次后自动带出生产日期和有效期（对齐 web handleBatchConfirm）
-                                      editBirthdate = _formatBatchDate(batchResult['birthdate']);
-                                      final bd = editBirthdate.isNotEmpty ? editBirthdate : '';
-                                      editValiddate = _formatBatchDate(batchResult['validdate']);
-                                      if (editValiddate.isEmpty && bd.isNotEmpty) {
-                                        editValiddate = bd;
-                                      }
-                                      editSupid = batchResult['supid']?.toString() ?? '';
+                                      currentUnit = item['unit']?.toString() ?? currentUnit;
+                                      currentSize = item['size']?.toString() ?? currentSize;
+                                      barcode = item['barcode']?.toString() ?? barcode;
+                                      shelves = item['shelves']?.toString() ?? shelves;
+                                      costPrice = item['costprice']?.toString() ?? costPrice;
+                                      stockqty = _checkAllBatch
+                                          ? (double.tryParse(
+                                                  item['allstockqty']?.toString() ?? '') ??
+                                              stockqty)
+                                          : (double.tryParse(item['stockqty']?.toString() ?? '') ??
+                                              stockqty);
                                     });
-                                  }
-                                }),
+                                  })
+                                else
+                                  _buildInfoRow('单位', currentUnit.isNotEmpty ? currentUnit : '-'),
+                                const SizedBox(height: 8),
+                                // 规格（预盘单可选，对齐 lxAss proDetails.vue；快速盘点不开放）
+                                if (isYpd && SelectUnitSizeSheet.canSelectSize(item))
+                                  _buildSelectField(
+                                      '规格', currentSize.isNotEmpty ? currentSize : '请选择',
+                                      onTap: () async {
+                                    final result = await SelectUnitSizeSheet.show(
+                                      ctx,
+                                      type: 'size',
+                                      item: item,
+                                      bsid: (widget.storeid ?? '').toString(),
+                                      counterid: widget.counterid ?? '',
+                                    );
+                                    if (result == null) return;
+                                    await SelectUnitSizeSheet.apply(item,
+                                        type: 'size',
+                                        result: result,
+                                        bsid: (widget.storeid ?? '').toString(),
+                                        counterid: widget.counterid ?? '',
+                                        // 库存回写口径：不管理批次写商品总库存 allstockqty，否则写批次库存 stockqty
+                                        stockAllBatch: _checkAllBatch);
+                                    if (!ctx.mounted) return;
+                                    setDialogState(() {
+                                      currentSize = item['size']?.toString() ?? currentSize;
+                                      barcode = item['barcode']?.toString() ?? barcode;
+                                      costPrice = item['costprice']?.toString() ?? costPrice;
+                                      stockqty = _checkAllBatch
+                                          ? (double.tryParse(
+                                                  item['allstockqty']?.toString() ?? '') ??
+                                              stockqty)
+                                          : (double.tryParse(item['stockqty']?.toString() ?? '') ??
+                                              stockqty);
+                                    });
+                                  })
+                                else
+                                  _buildInfoRow('规格', currentSize.isNotEmpty ? currentSize : '-'),
+                                const SizedBox(height: 12),
+                                // 批次（可手动输入，右侧箭头打开批次选择；对齐 lxAss proDetails manualBatchInput）
+                                // 系统参数「盘点不管理批次」开启时整块隐藏（对齐 lxAss myParam）
+                                if (!_checkAllBatch)
+                                  _buildBatchInputField('批次', batchCtrl, onChanged: (v) {
+                                    setDialogState(() => editBatchno = v);
+                                  }, onChoose: () async {
+                                    final productid = item['productid']?.toString() ??
+                                        item['prodid']?.toString() ??
+                                        '';
+                                    if (productid.isEmpty) {
+                                      Toast.show('商品信息异常');
+                                      return;
+                                    }
+                                    // 多批次商品：点击右侧箭头主动跳转多批次选择（对齐 lxAss chosePc(true) isManual）
+                                    if (moreBatch) {
+                                      await openMultBatch();
+                                      return;
+                                    }
+                                    final batchResult =
+                                        await showModalBottomSheet<Map<String, dynamic>>(
+                                      context: ctx,
+                                      isScrollControlled: true,
+                                      backgroundColor: Colors.transparent,
+                                      builder: (_) => SelectBatchSheet(
+                                        productid: productid,
+                                        bsid: (widget.storeid ?? '').toString(),
+                                        counterid: widget.counterid ?? '',
+                                        initialBatchNo: editBatchno,
+                                      ),
+                                    );
+                                    if (batchResult != null) {
+                                      setDialogState(() {
+                                        editBatchno = batchResult['batchno']?.toString() ?? '';
+                                        batchCtrl.text = editBatchno;
+                                        // 选择批次后自动带出生产日期和有效期（对齐 web handleBatchConfirm）
+                                        editBirthdate = _formatBatchDate(batchResult['birthdate']);
+                                        final bd = editBirthdate.isNotEmpty ? editBirthdate : '';
+                                        editValiddate = _formatBatchDate(batchResult['validdate']);
+                                        if (editValiddate.isEmpty && bd.isNotEmpty) {
+                                          editValiddate = bd;
+                                        }
+                                        editSupid = batchResult['supid']?.toString() ?? '';
+                                      });
+                                    }
+                                  }),
                                 const SizedBox(height: 12),
                                 // 盘点/预盘数量（多批次时箭头选择跳多选，非多批次保持加减输入）
                                 (enableMultBatch
@@ -1784,13 +2039,29 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                         ? const Color(0xFF00A870)
                                         : const Color(0xFFD54B5A)),
                                 const SizedBox(height: 12),
-                                // 生产/有效日期：只读展示，不可修改（对齐 lxAss 预盘/快速盘点 tm-text 只读）
+                                // 生产/有效日期：可点击选择（对齐 lxAss proDetails openCalendar）
                                 if (!hideDateRows) ...[
-                                  _buildInfoRow(
-                                      '生产日期', editBirthdate.isNotEmpty ? editBirthdate : '-'),
+                                  _buildSelectField(
+                                      '生产日期', editBirthdate.isNotEmpty ? editBirthdate : '请选择',
+                                      onTap: () async {
+                                    final picked = await _pickInventoryDate(ctx, editBirthdate);
+                                    if (picked == null || !ctx.mounted) return;
+                                    setDialogState(() {
+                                      editBirthdate = picked;
+                                      // 保质期商品：生产日期 + 保质天数自动算出有效日期（对齐 lxAss birthdateConfirm）
+                                      final linked =
+                                          _calcLinkedDate(picked, item, isBirthdate: true);
+                                      if (linked.isNotEmpty) editValiddate = linked;
+                                    });
+                                  }),
                                   const SizedBox(height: 12),
-                                  _buildInfoRow(
-                                      '有效日期', editValiddate.isNotEmpty ? editValiddate : '-'),
+                                  _buildSelectField(
+                                      '有效日期', editValiddate.isNotEmpty ? editValiddate : '请选择',
+                                      onTap: () async {
+                                    final picked = await _pickInventoryDate(ctx, editValiddate);
+                                    if (picked == null || !ctx.mounted) return;
+                                    setDialogState(() => editValiddate = picked);
+                                  }),
                                   const SizedBox(height: 12),
                                 ],
                                 // 备注
@@ -1855,6 +2126,65 @@ class _SelectProductPageState extends State<SelectProductPage> {
     });
   }
 
+  /// 切换单位/规格后按批次重取成本价与库存
+  /// （对齐 zmProMax unitConfirm/changeSize → getUnitPrice → stockproduct/getBacthList）
+  ///
+  /// 返回待写回的字段：普通库存单据为 costprice/stockqty；
+  /// 转仓单（mergData 带移出/移入仓库）为 incostprice/outcostprice/oldinqty/oldoutqty
+  Future<Map<String, String>> _fetchBatchStockByUnitSize(
+    Map<String, dynamic> item,
+    String type,
+    Map<String, dynamic> result,
+  ) async {
+    final Map<String, dynamic> mergData = widget.mergData ?? const <String, dynamic>{};
+    final String outcounterid = mergData['outcounterid']?.toString() ?? '';
+    final String incounterid = mergData['incounterid']?.toString() ?? '';
+    final bool isMove = outcounterid.isNotEmpty || incounterid.isNotEmpty;
+    final List<Map<String, dynamic>> list = await SelectUnitSizeSheet.fetchBatchStock(
+      productid: item['productid']?.toString() ?? item['prodid']?.toString() ?? '',
+      bsid: (widget.storeid ?? '').toString(),
+      batchno: item['batchno']?.toString() ?? '',
+      counterid: isMove ? null : (widget.counterid ?? ''),
+      outcounterid: isMove ? outcounterid : null,
+      incounterid: isMove ? incounterid : null,
+      unitonlyid: type == 'unit'
+          ? (result['unitonlyid']?.toString() ?? result['_id']?.toString() ?? '')
+          : null,
+      sizeonlyid: type == 'size'
+          ? (result['sizeonlyid']?.toString() ?? result['_id']?.toString() ?? '')
+          : null,
+    );
+    if (list.isEmpty) {
+      // 无批次库存：回退 emptycostprice/emptybatchstockqty（转仓为 in/outempty*），再回退原值
+      final String emptyCost = MathUtils.formatDecimal(
+          2, result['emptycostprice'] ?? result['costprice'] ?? item['costprice'] ?? 0);
+      final String emptyQty = MathUtils.formatDecimal(
+          2, result['emptybatchstockqty'] ?? result['stockqty'] ?? item['stockqty'] ?? 0);
+      if (!isMove) {
+        return <String, String>{'costprice': emptyCost, 'stockqty': emptyQty};
+      }
+      return <String, String>{
+        'incostprice': MathUtils.formatDecimal(2, result['inemptycostprice'] ?? emptyCost),
+        'outcostprice': MathUtils.formatDecimal(2, result['outemptycostprice'] ?? emptyCost),
+        'oldinqty': MathUtils.formatDecimal(2, result['inemptybatchstockqty'] ?? emptyQty),
+        'oldoutqty': MathUtils.formatDecimal(2, result['outemptybatchstockqty'] ?? emptyQty),
+      };
+    }
+    final Map<String, dynamic> first = list.first;
+    if (!isMove) {
+      return <String, String>{
+        'costprice': MathUtils.formatDecimal(2, first['costprice'] ?? 0),
+        'stockqty': MathUtils.formatDecimal(2, first['stockqty'] ?? 0),
+      };
+    }
+    return <String, String>{
+      'incostprice': MathUtils.formatDecimal(2, first['incostprice'] ?? first['costprice'] ?? 0),
+      'outcostprice': MathUtils.formatDecimal(2, first['outcostprice'] ?? first['costprice'] ?? 0),
+      'oldinqty': MathUtils.formatDecimal(2, first['instockqty'] ?? first['stockqty'] ?? 0),
+      'oldoutqty': MathUtils.formatDecimal(2, first['outstockqty'] ?? first['stockqty'] ?? 0),
+    };
+  }
+
   // ─── 库存单据抽屉（kctz/ycd：其他出库/其他入库/转仓）：单位/规格/数量/商品批次/生产日期/有效日期/备注 ────────────────────
   void _showStockDetail(Map<String, dynamic> item) {
     // 多批次商品：本次选择的批次列表（库存单据无多批次入口，恒为空，仅保持结构一致）
@@ -1874,8 +2204,11 @@ class _SelectProductPageState extends State<SelectProductPage> {
     var currentUnit = existItem?['unit']?.toString() ?? _getUnit(item);
     var currentSize = existItem?['size']?.toString() ?? _getSize(item);
     var editBatchno = existItem?['batchno']?.toString() ?? item['batchno']?.toString() ?? '';
-    var editBirthdate = existItem?['birthdate']?.toString() ?? item['birthdate']?.toString() ?? '';
-    var editValiddate = existItem?['validdate']?.toString() ?? item['validdate']?.toString() ?? '';
+    // 日期字段统一按 YYYY-MM-DD 展示，隐藏时分秒（对齐 Vue）
+    var editBirthdate = _formatBatchDate(
+        existItem?['birthdate']?.toString() ?? item['birthdate']?.toString() ?? '');
+    var editValiddate = _formatBatchDate(
+        existItem?['validdate']?.toString() ?? item['validdate']?.toString() ?? '');
     var editSupid = existItem?['supid']?.toString() ?? item['supid']?.toString() ?? '';
     var editRemark = existItem?['remark']?.toString() ?? item['remark']?.toString() ?? '';
     double editQty =
@@ -1945,6 +2278,11 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                 'unit', item,
                                                 withStock: withStock);
                                             if (result != null) {
+                                              // 按批次重取成本价与库存
+                                              // （对齐 zmProMax unitConfirm → getUnitPrice）
+                                              final batchValues = await _fetchBatchStockByUnitSize(
+                                                  item, 'unit', result);
+                                              if (!ctx.mounted) return;
                                               setDialogState(() {
                                                 final u = result['unit']?.toString() ??
                                                     result['_name']?.toString() ??
@@ -1961,6 +2299,8 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                   item['sizeonlyid'] =
                                                       item['_mainSizeonlyid']?.toString() ?? '';
                                                 }
+                                                // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+                                                syncUnitProductName(item, result, unitonlyid: uid);
                                                 // barcode = sbarcode || barcode（对齐 zmProMax unitConfirm）
                                                 final nb = result['sbarcode']?.toString() ??
                                                     result['barcode']?.toString();
@@ -1977,34 +2317,17 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                   item['retailprice'] = nr;
                                                   item['sellprice'] = nr;
                                                 }
-                                                // 库存更新（stockqty）
-                                                final ns = result['stockqty']?.toString() ??
-                                                    result['stock']?.toString();
-                                                if (ns != null && ns.isNotEmpty) {
+                                                // 库存/成本价按批次结果写回
+                                                // （对齐 zmProMax unitConfirm：costprice/stockqty 或 in/out 成本价与库存）
+                                                item.addAll(batchValues);
+                                                final String ns = batchValues['stockqty'] ??
+                                                    batchValues['oldoutqty'] ??
+                                                    '';
+                                                if (ns.isNotEmpty) {
                                                   stock = ns;
                                                   item['stock'] = ns;
-                                                  final nq = double.tryParse(ns);
-                                                  if (nq != null) {
-                                                    stockqty = nq;
-                                                    item['stockqty'] = ns;
-                                                  }
-                                                }
-                                                // 成本价更新（对齐 zmProMax unitConfirm: costprice）
-                                                final ncost = result['costprice']?.toString();
-                                                if (ncost != null && ncost.isNotEmpty) {
-                                                  item['costprice'] = ncost;
-                                                }
-                                                // 移仓单出入成本价（对齐 zmProMax unitConfirm: outemptycostprice/inemptycostprice）
-                                                final nout =
-                                                    result['outemptycostprice']?.toString();
-                                                if (nout != null && nout.isNotEmpty) {
-                                                  item['outcostprice'] = nout;
-                                                  item['outemptycostprice'] = nout;
-                                                }
-                                                final nin = result['inemptycostprice']?.toString();
-                                                if (nin != null && nin.isNotEmpty) {
-                                                  item['incostprice'] = nin;
-                                                  item['inemptycostprice'] = nin;
+                                                  item['stockqty'] = ns;
+                                                  stockqty = double.tryParse(ns) ?? stockqty;
                                                 }
                                                 // 货架号更新（对齐 zmProMax unitConfirm: shelves）
                                                 final nsh = result['shelves']?.toString();
@@ -2028,6 +2351,11 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                 'size', item,
                                                 withStock: withStock);
                                             if (result != null) {
+                                              // 按批次重取成本价与库存
+                                              // （对齐 zmProMax changeSize → getUnitPrice）
+                                              final batchValues = await _fetchBatchStockByUnitSize(
+                                                  item, 'size', result);
+                                              if (!ctx.mounted) return;
                                               setDialogState(() {
                                                 final s = result['size']?.toString() ??
                                                     result['_name']?.toString() ??
@@ -2058,34 +2386,17 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                                   item['retailprice'] = nr;
                                                   item['sellprice'] = nr;
                                                 }
-                                                // 库存更新（stockqty）
-                                                final ns = result['stockqty']?.toString() ??
-                                                    result['stock']?.toString();
-                                                if (ns != null && ns.isNotEmpty) {
+                                                // 库存/成本价按批次结果写回
+                                                // （对齐 zmProMax changeSize：costprice/stockqty 或 in/out 成本价与库存）
+                                                item.addAll(batchValues);
+                                                final String ns = batchValues['stockqty'] ??
+                                                    batchValues['oldoutqty'] ??
+                                                    '';
+                                                if (ns.isNotEmpty) {
                                                   stock = ns;
                                                   item['stock'] = ns;
-                                                  final nq = double.tryParse(ns);
-                                                  if (nq != null) {
-                                                    stockqty = nq;
-                                                    item['stockqty'] = ns;
-                                                  }
-                                                }
-                                                // 成本价更新（对齐 zmProMax changeSize: costprice）
-                                                final ncost = result['costprice']?.toString();
-                                                if (ncost != null && ncost.isNotEmpty) {
-                                                  item['costprice'] = ncost;
-                                                }
-                                                // 移仓单出入成本价（对齐 zmProMax changeSize: outemptycostprice/inemptycostprice）
-                                                final nout =
-                                                    result['outemptycostprice']?.toString();
-                                                if (nout != null && nout.isNotEmpty) {
-                                                  item['outcostprice'] = nout;
-                                                  item['outemptycostprice'] = nout;
-                                                }
-                                                final nin = result['inemptycostprice']?.toString();
-                                                if (nin != null && nin.isNotEmpty) {
-                                                  item['incostprice'] = nin;
-                                                  item['inemptycostprice'] = nin;
+                                                  item['stockqty'] = ns;
+                                                  stockqty = double.tryParse(ns) ?? stockqty;
                                                 }
                                               });
                                             }
@@ -2140,7 +2451,16 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                       '生产日期', editBirthdate.isNotEmpty ? editBirthdate : '请选择',
                                       onTap: () {
                                     _pickInventoryDate(ctx, editBirthdate).then((v) {
-                                      if (v != null) setDialogState(() => editBirthdate = v);
+                                      if (v == null) return;
+                                      // 保质期商品且有效日期为空时按 validday 正向填充（对齐 Vue
+                                      // handleBillBirthdate 防覆盖：有效日期已有值则保留）
+                                      final link = editValiddate.isEmpty
+                                          ? _calcLinkedDate(v, item, isBirthdate: true)
+                                          : '';
+                                      setDialogState(() {
+                                        editBirthdate = v;
+                                        if (link.isNotEmpty) editValiddate = link;
+                                      });
                                     });
                                   }),
                                   const SizedBox(height: 12),
@@ -2149,7 +2469,16 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                       '有效日期', editValiddate.isNotEmpty ? editValiddate : '请选择',
                                       onTap: () {
                                     _pickInventoryDate(ctx, editValiddate).then((v) {
-                                      if (v != null) setDialogState(() => editValiddate = v);
+                                      if (v == null) return;
+                                      // 保质期商品且生产日期为空时按 validday 反算填充（对齐 Vue
+                                      // handleBillBirthdate 防覆盖：生产日期已有值则保留）
+                                      final link = editBirthdate.isEmpty
+                                          ? _calcLinkedDate(v, item, isBirthdate: false)
+                                          : '';
+                                      setDialogState(() {
+                                        editValiddate = v;
+                                        if (link.isNotEmpty) editBirthdate = link;
+                                      });
                                     });
                                   }),
                                 ] else ...[
@@ -2200,7 +2529,16 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                         '生产日期', editBirthdate.isNotEmpty ? editBirthdate : '请选择',
                                         onTap: () {
                                       _pickInventoryDate(ctx, editBirthdate).then((v) {
-                                        if (v != null) setDialogState(() => editBirthdate = v);
+                                        if (v == null) return;
+                                        // 保质期商品且有效日期为空时按 validday 正向填充（对齐 Vue
+                                        // handleBillBirthdate 防覆盖：有效日期已有值则保留）
+                                        final link = editValiddate.isEmpty
+                                            ? _calcLinkedDate(v, item, isBirthdate: true)
+                                            : '';
+                                        setDialogState(() {
+                                          editBirthdate = v;
+                                          if (link.isNotEmpty) editValiddate = link;
+                                        });
                                       });
                                     }),
                                   ],
@@ -2214,7 +2552,16 @@ class _SelectProductPageState extends State<SelectProductPage> {
                                         '有效日期', editValiddate.isNotEmpty ? editValiddate : '请选择',
                                         onTap: () {
                                       _pickInventoryDate(ctx, editValiddate).then((v) {
-                                        if (v != null) setDialogState(() => editValiddate = v);
+                                        if (v == null) return;
+                                        // 保质期商品且生产日期为空时按 validday 反算填充（对齐 Vue
+                                        // handleBillBirthdate 防覆盖：生产日期已有值则保留）
+                                        final link = editBirthdate.isEmpty
+                                            ? _calcLinkedDate(v, item, isBirthdate: false)
+                                            : '';
+                                        setDialogState(() {
+                                          editValiddate = v;
+                                          if (link.isNotEmpty) editBirthdate = link;
+                                        });
                                       });
                                     }),
                                   ],
@@ -2650,6 +2997,43 @@ class _SelectProductPageState extends State<SelectProductPage> {
     );
   }
 
+  /// 批次输入行：可手动输入批次号，右侧箭头打开批次选择（对齐 lxAss proDetails manualBatchInput）
+  Widget _buildBatchInputField(String label, TextEditingController controller,
+      {required ValueChanged<String> onChanged, VoidCallback? onChoose}) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 70,
+          child: Text('$label：', style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
+        ),
+        Expanded(
+          child: TextField(
+            controller: controller,
+            keyboardType: TextInputType.text,
+            textAlign: TextAlign.right,
+            style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
+            onChanged: onChanged,
+            decoration: const InputDecoration(
+              hintText: '请输入',
+              border: InputBorder.none,
+              isDense: true,
+              contentPadding: EdgeInsets.zero,
+              hintStyle: TextStyle(fontSize: 13, color: Color(0xFFD1D5DB)),
+            ),
+          ),
+        ),
+        if (onChoose != null) ...[
+          const SizedBox(width: 4),
+          GestureDetector(
+            onTap: onChoose,
+            behavior: HitTestBehavior.opaque,
+            child: const Icon(Icons.chevron_right, size: 16, color: Color(0xFFD1D5DB)),
+          ),
+        ],
+      ],
+    );
+  }
+
   Widget _buildSelectField(String label, String value, {VoidCallback? onTap}) {
     return GestureDetector(
       onTap: onTap,
@@ -2677,6 +3061,22 @@ class _SelectProductPageState extends State<SelectProductPage> {
         ],
       ),
     );
+  }
+
+  /// 生产日期/有效日期基于保质天数（validday）联动计算（对齐 Vue handleBillBirthdate）：
+  /// 正向（isBirthdate=true）生产日期 + validday = 有效日期；反向 有效日期 - validday = 生产日期。
+  /// 非保质期商品（validflag != 1）、无保质天数（validday <= 0）或日期无效时返回空串
+  static String _calcLinkedDate(String baseDate, Map<String, dynamic> src,
+      {required bool isBirthdate}) {
+    if (src['validflag']?.toString() != '1') return '';
+    final days = num.tryParse(src['validday']?.toString() ?? '') ?? 0;
+    if (days <= 0) return '';
+    final d = DateTime.tryParse(baseDate);
+    if (d == null) return '';
+    final v = isBirthdate
+        ? d.add(Duration(days: days.toInt()))
+        : d.subtract(Duration(days: days.toInt()));
+    return '${v.year}-${v.month.toString().padLeft(2, '0')}-${v.day.toString().padLeft(2, '0')}';
   }
 
   Future<String?> _pickInventoryDate(BuildContext ctx, String currentValue) async {
@@ -3184,12 +3584,21 @@ class _SelectProductPageState extends State<SelectProductPage> {
     }
   }
 
+  /// 系统参数「盘点不管理批次」(stockCheckAllBatch)：预盘单/快速盘点单开启后同一商品多批次库存合并，
+  /// 库存取商品总库存 allstockqty，且不再选批次（对齐 lxAss selectProduct checkAllBatch）
+  bool get _checkAllBatch {
+    final billType = widget.billtypeflag ?? '';
+    if (billType != 'ypd' && billType != 'kspd') return false;
+    return _loginParamInt('stockCheckAllBatch') == 1;
+  }
+
   void _confirm() {
     // 对齐 Vue selectProduct.vue getAmt / 单据 edit.vue comProAmt：
     // 返回前统一补全 amt（qty × price），确保主页面可直接使用；
     // 手动修改过小计金额的商品（_amtManual=true）保留其 amt，
     // 除非系统参数 cgAmountRecalculationflag==1 强制按 qty × price 重算（对齐 writeData 收尾分支）
     final cgpriceflag = widget.mergData?['cgpriceflag']?.toString() == '1';
+    final pfpriceflag = widget.mergData?['pfpriceflag']?.toString() == '1';
     final recalcAllAmt = _loginParamInt('cgAmountRecalculationflag') == 1;
     for (final item in _selectedItems) {
       final manual = item['_amtManual'] == true;
@@ -3197,7 +3606,9 @@ class _SelectProductPageState extends State<SelectProductPage> {
       final qty = double.tryParse(item['qty']?.toString() ?? '0') ?? 0;
       final priceText = cgpriceflag
           ? _cgPriceText(item, fallback: '0')
-          : (item['sellprice']?.toString() ?? item['price']?.toString() ?? '0');
+          : pfpriceflag
+              ? (item['price']?.toString() ?? '0')
+              : (item['sellprice']?.toString() ?? item['price']?.toString() ?? '0');
       final price = double.tryParse(priceText) ?? 0;
       item['amt'] = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
     }
@@ -3476,6 +3887,7 @@ class _SelectProductPageState extends State<SelectProductPage> {
                   getStock: _getStock,
                   getPrice: _getPrice,
                   getImageUrl: _getImageUrl,
+                  showUnitTag: _isUnitList,
                   // onQtyTap: 点击数量数字弹出详情抽屉
                   onQtyTap: () => _showProductDetail(item),
                   onQuickAdd: () => _quickAdd(item),
@@ -3610,6 +4022,7 @@ class _ProductCard extends StatelessWidget {
     this.checkboxMode = false,
     this.singleSelectMode = false,
     this.isSelected = false,
+    this.showUnitTag = false,
     this.onToggle,
   });
   final Map<String, dynamic> item;
@@ -3626,6 +4039,9 @@ class _ProductCard extends StatelessWidget {
   final bool checkboxMode;
   final bool singleSelectMode;
   final bool isSelected;
+
+  /// 包装单位列表（getProductUnitList）：不返回库存/价格，展示单位行替代库存价格行
+  final bool showUnitTag;
   final VoidCallback? onToggle;
 
   @override
@@ -3639,6 +4055,45 @@ class _ProductCard extends StatelessWidget {
 
     // RepaintBoundary 隔离每张卡片的重绘范围，避免滚动时全列表重绘
     final isSelectMode = checkboxMode || singleSelectMode;
+    // 单选/复选指示器：价格行与单位行共用（互斥模式，二选一）
+    final Widget? selectIndicator = checkboxMode
+        ? Container(
+            width: 16,
+            height: 16,
+            decoration: BoxDecoration(
+              color: isSelected ? const Color(0xFF4688FA) : Colors.transparent,
+              borderRadius: BorderRadius.circular(3),
+              border: Border.all(
+                color: isSelected ? const Color(0xFF4688FA) : const Color(0xFFCCCCCC),
+                width: 1.5,
+              ),
+            ),
+            child: isSelected ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
+          )
+        : singleSelectMode
+            ? Container(
+                width: 18,
+                height: 18,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: isSelected ? const Color(0xFF4688FA) : const Color(0xFFCCCCCC),
+                    width: 1.5,
+                  ),
+                ),
+                child: isSelected
+                    ? const Padding(
+                        padding: EdgeInsets.all(3),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Color(0xFF4688FA),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      )
+                    : null,
+              )
+            : null;
     return RepaintBoundary(
       child: GestureDetector(
         behavior: isSelectMode ? HitTestBehavior.opaque : null,
@@ -3702,71 +4157,43 @@ class _ProductCard extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    const SizedBox(height: 3),
-                    Text('库存: $stock',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Text(
-                          '¥$price',
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFFEF4444),
-                          ),
-                        ),
-                        if (!checkboxMode && !singleSelectMode) ...[
-                          const Spacer(),
-                          _buildSelectButton(),
+                    if (showUnitTag) ...[
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          Text('单位: $unit',
+                              style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                          if (selectIndicator != null) ...[
+                            const Spacer(),
+                            selectIndicator,
+                          ],
                         ],
-                        if (checkboxMode) ...[
-                          const Spacer(),
-                          Container(
-                            width: 16,
-                            height: 16,
-                            decoration: BoxDecoration(
-                              color: isSelected ? const Color(0xFF4688FA) : Colors.transparent,
-                              borderRadius: BorderRadius.circular(3),
-                              border: Border.all(
-                                color:
-                                    isSelected ? const Color(0xFF4688FA) : const Color(0xFFCCCCCC),
-                                width: 1.5,
-                              ),
+                      ),
+                    ] else ...[
+                      const SizedBox(height: 3),
+                      Text('库存: $stock',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Text(
+                            '¥$price',
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFFEF4444),
                             ),
-                            child: isSelected
-                                ? const Icon(Icons.check, size: 12, color: Colors.white)
-                                : null,
                           ),
+                          if (selectIndicator == null) ...[
+                            const Spacer(),
+                            _buildSelectButton(),
+                          ] else ...[
+                            const Spacer(),
+                            selectIndicator,
+                          ],
                         ],
-                        if (singleSelectMode) ...[
-                          const Spacer(),
-                          Container(
-                            width: 18,
-                            height: 18,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color:
-                                    isSelected ? const Color(0xFF4688FA) : const Color(0xFFCCCCCC),
-                                width: 1.5,
-                              ),
-                            ),
-                            child: isSelected
-                                ? const Padding(
-                                    padding: EdgeInsets.all(3),
-                                    child: DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        color: Color(0xFF4688FA),
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                  )
-                                : null,
-                          ),
-                        ],
-                      ],
-                    ),
+                      ),
+                    ],
                   ],
                 ),
               ),

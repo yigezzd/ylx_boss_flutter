@@ -277,7 +277,7 @@ class _BluetoothPrinterPageState extends State<BluetoothPrinterPage> {
     setState(() => _connectingMac = _savedMac);
     bool ok = false;
     try {
-      ok = await GPrinter.connect(_savedMac);
+      ok = await GPrinter.connect(_savedMac, name: _savedName);
     } catch (_) {}
     if (!mounted) {
       return;
@@ -333,7 +333,7 @@ class _BluetoothPrinterPageState extends State<BluetoothPrinterPage> {
     }
     setState(() => _connectingMac = device.mac);
     try {
-      final ok = await GPrinter.connect(device.mac);
+      final ok = await GPrinter.connect(device.mac, name: device.name);
       if (!mounted) {
         return;
       }

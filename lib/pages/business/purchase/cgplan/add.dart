@@ -17,11 +17,13 @@ import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/math_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
+import 'package:flutter_deer/util/product_unit_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/load_image.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
 import 'package:flutter_deer/widgets/select_field_item.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:flutter_deer/widgets/voice_recognition_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
@@ -66,6 +68,9 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
   String _userCode = '';
   String _userid = '';
 
+  /// 是否允许查看货商信息（user.supflag == 1），对齐 PC cgplan 明细 supflag 控制
+  bool _supflag = false;
+
   _CPAction _submitAction = _CPAction.none;
   bool _detailLoading = false;
 
@@ -93,6 +98,9 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
 
   // 附件列表
   List<Map<String, dynamic>> _fileLists = [];
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   @override
   void initState() {
@@ -145,6 +153,7 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
         final Map<String, dynamic> userMap = jsonDecode(userStr) as Map<String, dynamic>;
         _userid = userMap['userid']?.toString() ?? '';
         _userCode = userMap['code']?.toString() ?? '';
+        _supflag = userMap['supflag']?.toString() == '1';
       }
     } catch (_) {}
 
@@ -153,6 +162,8 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
     } else {
       _loadNewModeDefaults();
     }
+    // 新增模式：同步默认值回填完成后建立基线，未改动直接返回不弹窗
+    _refreshSnapshot();
     logEnter();
   }
 
@@ -277,11 +288,59 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
       }
     }).whenComplete(() {
       if (mounted) setState(() => _detailLoading = false);
+      // 详情加载完成后重建基线，未改动直接离开不弹窗
+      _refreshSnapshot();
     });
   }
 
+  // =================== 返回与未保存修改检测 ===================
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _storeid,
+      _buyerid,
+      _remarkController.text,
+      jsonEncode(_fileLists),
+      _items
+          .map((r) =>
+              '${r.prodid}_${r.nameController.text}_${r.qtyController.text}_${r.priceController.text}')
+          .join(','),
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 未保存拦截仅在可保存态生效：新增/未审核（signflag 0）单据；
+  /// 已审核(1)/驳回待处理(2) 为只读态，无保存入口，直接放行
+  bool get _guardEnabled {
+    final signflag = int.tryParse(_billData?['signflag']?.toString() ?? '0') ?? 0;
+    return signflag == 0;
+  }
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_guardEnabled || !_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      _submit(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
   // =================== 提交保存 ===================
-  void _submit({bool withSign = false}) {
+  void _submit({bool withSign = false, bool popAfterSave = false}) {
     // 权限校验：区分新增/编辑
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('011203', showTip: false)) {
@@ -364,6 +423,8 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
     request(HttpApi.cgplanSave, params).then((result) {
       if (!mounted) return;
       Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      // 保存成功后重建基线，避免后续跳转/停留被误判为未保存
+      _refreshSnapshot();
       final retData = result['data'];
       if (retData is Map<String, dynamic>) {
         if (_isEdit) {
@@ -384,6 +445,8 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
         if (withSign) {
           _doSignAfterSave(retData);
         }
+        // 返回时确认保存的场景：保存成功后返回上一页；普通保存仍留在当前页
+        if (popAfterSave && !withSign && mounted) Navigator.pop(context, true);
       } else {
         if (!_isEdit) Navigator.pop(context, true);
       }
@@ -714,6 +777,8 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
     request(HttpApi.cgplanSave, params).then((result) {
       if (!mounted) return;
       Toast.show(result['retmsg']?.toString() ?? '保存成功');
+      // 保存成功后重建基线，避免后续跳转/停留被误判为未保存
+      _refreshSnapshot();
       final retData = result['data'];
       if (retData is Map<String, dynamic>) {
         if (!_isEdit) {
@@ -867,6 +932,25 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
     });
   }
 
+  /// 红外扫描框是否渲染（数量失焦后焦点恢复的判据，与扫描框渲染条件保持一致）
+  bool get _showScanBox => !_readOnly && _scanSettings.showInfraredInput;
+
+  /// 明细行数量失焦后焦点"落空"（收起键盘、点按非输入区域等）时，将焦点恢复到红外扫描框，
+  /// 支持连续扫码；焦点已落到其他输入框（用户主动点按其他行/字段等）时不干预，避免打断手工编辑
+  void _returnFocusToScanIfIdle() {
+    if (!_showScanBox) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showScanBox) return;
+      // 弹窗/其他页面覆盖中（商品详情弹窗、选品页等）不抢焦点
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      final FocusNode? primaryFocus = FocusManager.instance.primaryFocus;
+      // 焦点已在某个具体控件上（其他输入框或扫描框自身）：不干预
+      if (primaryFocus != null && primaryFocus is! FocusScopeNode) return;
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
+  }
+
   /// 数量输入框失焦处理：格式化 + 重算金额（对齐 Vue writeData qty 逻辑）
   void _handleQtyChanged(int index) {
     final row = _items[index];
@@ -875,6 +959,8 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
     final p = double.tryParse(row.priceController.text) ?? 0;
     row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, p));
     setState(() {});
+    // 数量失焦后评估恢复扫描框焦点（连续扫码）
+    _returnFocusToScanIfIdle();
   }
 
   /// 机构切换后刷新商品价格（对齐 Vue updateCgPrice）
@@ -966,6 +1052,14 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
           // 重算金额
           final qty = MathUtils.formatDecimalNum(1, double.tryParse(row.qtyController.text) ?? 0);
           row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, price));
+
+          // 价格同步后回写商品最新的规格、单位 id（对齐 Vue updateTableDataInPlace）
+          if (row.rawData != null) {
+            final newSizeId = item['newsizeonlyid']?.toString();
+            final newUnitId = item['newunitonlyid']?.toString();
+            if (newSizeId != null) row.rawData!['sizeonlyid'] = newSizeId;
+            if (newUnitId != null) row.rawData!['unitonlyid'] = newUnitId;
+          }
         }
       });
     } catch (e) {
@@ -998,6 +1092,7 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
           bsid: _storeid,
           readOnly: _readOnly,
           priceReadOnly: true,
+          showSup: _supflag,
         ),
       ),
     );
@@ -1017,6 +1112,9 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
         final sizeonlyid = result['sizeonlyid']?.toString();
         if (sizeonlyid != null) raw['sizeonlyid'] = sizeonlyid;
         row.rawData = raw;
+        // 切换单位后同步列表商品名称（包装单位取包装名称）
+        final newName = raw['productname']?.toString() ?? '';
+        if (newName.isNotEmpty) row.nameController.text = newName;
         final p = double.tryParse(row.priceController.text) ?? 0;
         row.amt = MathUtils.formatDecimalNum(3, MathUtils.mul(qty, p));
       });
@@ -1146,6 +1244,7 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
   /// 构建商品查询参数（对齐 Vue mergDataFn）
   Map<String, dynamic> _buildMergData() {
     return {
+      'bzshowflag': 1,
       'stockflag': 1,
       'storeid': _storeid ?? '',
       'counterid': '',
@@ -1161,7 +1260,7 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
   // =================== Build ===================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final page = Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -1171,7 +1270,7 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _onBackPressed,
         ),
         title: Text(
           _isEdit ? (_isSigned ? '采购计划详情' : (_isRejected ? '采购计划详情' : '修改采购计划')) : '新增采购计划',
@@ -1185,6 +1284,13 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
       body: _detailLoading
           ? const Center(child: CircularProgressIndicator(color: Color(0xFF006EFF)))
           : _buildBody(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 
@@ -1599,8 +1705,13 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
           required: true,
           value: _storeController.text,
           onTap: () async {
-            final result =
-                await SelectStorePage.show(context, initialSelectedId: _storeid?.toString());
+            // 对齐 Vue cgplan/edit.vue：登录门店 supflag==1 时才传 supflag（...(store.supflag == 1 ? { supflag: 1 } : {})）
+            final supflag = SelectStorePage.loginStoreField('supflag') == '1' ? '1' : null;
+            final result = await SelectStorePage.show(
+              context,
+              initialSelectedId: _storeid?.toString(),
+              supflag: supflag,
+            );
             if (result != null && mounted) {
               final oldStoreid = _storeid;
               setState(() {
@@ -2001,6 +2112,16 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
                 _items[existing].rawData!['price'] = newPrice;
               }
             }
+            final row = _items[existing];
+            row.rawData ??= {};
+            for (final key in const ['batchno', 'birthdate', 'validdate', 'stockqty']) {
+              if (prod.containsKey(key)) {
+                row.rawData![key] = prod[key];
+              }
+            }
+            row.batchno = row.rawData!['batchno']?.toString() ?? '';
+            row.stockqty = MathUtils.formatDecimalNum(
+                1, double.tryParse(row.rawData!['stockqty']?.toString() ?? '') ?? 0);
             // 对齐 Vue writeData：数量变化后重算 amt
             final price = double.tryParse(_items[existing].priceController.text) ?? 0;
             _items[existing].amt =
@@ -2022,6 +2143,9 @@ class _CgplanAddPageState extends State<CgplanAddPage> with LogPageMixin<CgplanA
               ..priceController.text = MathUtils.formatDecimal(2, rowPrice)
               ..prodid = prod['prodid']?.toString() ?? prod['productid']?.toString() ?? ''
               ..barcode = prod['barcode']?.toString() ?? prod['selfbarcode']?.toString() ?? ''
+              ..batchno = prod['batchno']?.toString() ?? ''
+              ..stockqty = MathUtils.formatDecimalNum(
+                  1, double.tryParse(prod['stockqty']?.toString() ?? '') ?? 0)
               ..rawData = Map<String, dynamic>.from(prod);
             // 新增行设置 amt（优先使用选择页返回的 amt，否则按数量×价格计算，对齐 instore）
             final prodAmt = prod['amt']?.toString();
@@ -2558,6 +2682,7 @@ class _ProDetailSheet extends StatefulWidget {
     this.bsid,
     this.readOnly = false,
     this.priceReadOnly = false,
+    this.showSup = false,
   });
   final Map<String, dynamic> productData;
   final double initialPrice;
@@ -2567,6 +2692,9 @@ class _ProDetailSheet extends StatefulWidget {
 
   /// 价格字段是否只读（对齐 Vue：采购计划 price 不可编辑）
   final bool priceReadOnly;
+
+  /// 是否允许查看货商信息（user.supflag == 1，对齐 PC cgplan 明细 supflag 控制）
+  final bool showSup;
 
   @override
   State<_ProDetailSheet> createState() => _ProDetailSheetState();
@@ -2591,11 +2719,10 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
     return productid.isNotEmpty && _sizeonlyid.isEmpty;
   }
 
-  /// 规格可选条件（对齐 Vue edit.vue size 列：v-if="row.specflag == 1 && !row.unitonlyid"）
+  /// 规格可选条件：采购单据暂不启用规格选择器，仅展示规格文本（与 PC 端 edit.vue 屏蔽 #size 插槽一致）；
+  /// 原条件为 specflag == '1' && _unitonlyid.isEmpty（对齐 Vue edit.vue size 列），恢复规格选择时按此还原
   bool get _sizeCanSelect {
-    final data = widget.productData;
-    final specflag = data['specflag']?.toString() ?? '';
-    return specflag == '1' && _unitonlyid.isEmpty;
+    return false;
   }
 
   @override
@@ -2638,6 +2765,9 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
         origCgprice != 0 ? data['cgprice'].toString() : (data['price']?.toString() ?? '0');
 
     final ro = widget.readOnly;
+    // 供应商展示（对齐 PC cgplan 明细：supflag != 1 时隐藏为 ****，为空显示 '-'）
+    final String supname = data['supname']?.toString() ?? '';
+    final String supDisplay = widget.showSup ? (supname.isNotEmpty ? supname : '-') : '****';
     return ConstrainedBox(
       constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
       child: Container(
@@ -2724,6 +2854,9 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
                     const SizedBox(height: 12),
                     // 原进价（只读）
                     _buildInfoRow('原进价', origPrice),
+                    _buildDivider(),
+                    // 供应商（只读；对齐 PC cgplan 明细：supflag != 1 时隐藏为 ****，为空显示 '-'）
+                    _buildInfoRow('供应商', supDisplay),
                     _buildDivider(),
                     // 单位（可点击选择，对齐 Vue proDetails.vue unit 字段）
                     _buildUnitSelectField(),
@@ -3123,6 +3256,8 @@ class _ProDetailSheetState extends State<_ProDetailSheet> {
         _unitonlyid = result['unitonlyid']?.toString() ?? result['_id']?.toString() ?? '';
         data['unit'] = _currentUnit;
         data['unitonlyid'] = _unitonlyid;
+        // 切换单位时同步商品名称：包装单位以包装名称为准，基础单位还原主商品名称
+        syncUnitProductName(data, result, unitonlyid: _unitonlyid);
         // cgpriceflag 模式：unitConfirm 价格逻辑
         final cgprice = result['cgprice']?.toString();
         if (cgprice != null) {

@@ -41,10 +41,13 @@ class _CommodityListPageState extends State<CommodityListPage> {
   String _filterSupname = '';
   String _filterItemtype = ''; // 商品类型
   String _filterPricetype = ''; // 计价方式
-  String _filterItemstatus = ''; // 商品状态（更多筛选中）
+  String _filterItemstatus = ''; // 商品状态（多选，逗号分隔如 '1,2'）
 
   /// 进价查看权限（对齐小程序 index.vue user.inpriceflag）
   int _inpriceflag = 1;
+
+  /// 库存查看权限（对齐小程序 index.vue user.checkstockflag）
+  int _checkstockflag = 1;
 
   // 筛选常量
   static const List<Map<String, String>> _itemTypes = [
@@ -77,7 +80,7 @@ class _CommodityListPageState extends State<CommodityListPage> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
-    _loadInpriceFlag();
+    _loadUserFlags();
     // 查看权限校验
     if (!PermissionUtils.checkPermission('010201', showTip: false)) {
       Toast.show('你无权查看商品档案，请在后台修改权限');
@@ -86,13 +89,14 @@ class _CommodityListPageState extends State<CommodityListPage> {
     }
   }
 
-  /// 从用户信息读取进价查看权限（对齐小程序 index.vue：inpriceflag==1 展示进价，否则展示 ***）
-  void _loadInpriceFlag() {
+  /// 从用户信息读取库存/进价查看权限（对齐小程序 index.vue user.checkstockflag / user.inpriceflag）
+  void _loadUserFlags() {
     try {
       final userStr = SpUtil.getString(Constant.user) ?? '';
       if (userStr.isNotEmpty) {
         final u = jsonDecode(userStr) as Map<String, dynamic>;
         _inpriceflag = int.tryParse(u['inpriceflag']?.toString() ?? '1') ?? 1;
+        _checkstockflag = int.tryParse(u['checkstockflag']?.toString() ?? '1') ?? 1;
       }
     } catch (_) {}
   }
@@ -149,9 +153,25 @@ class _CommodityListPageState extends State<CommodityListPage> {
   }
 
   Future<void> _onRefresh() async {
+    // 上拉加载进行中时先等它结束，否则会被 _loadData 的 _loading 守卫吞掉、列表停在旧数据
+    var waited = 0;
+    while (_loading && waited < 40) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      waited++;
+    }
     _page = 1;
     _hasMore = true;
     await _loadData();
+    _scrollToTop();
+  }
+
+  /// 刷新后回到顶部：新增/编辑保存返回时列表已重建为第一页，需复位滚动位置
+  void _scrollToTop() {
+    if (!mounted || !_scrollController.hasClients) return;
+    // 等新数据完成布局后再复位，否则会被旧的 maxScrollExtent 回弹
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _scrollController.hasClients) _scrollController.jumpTo(0);
+    });
   }
 
   void _onSearch() {
@@ -234,7 +254,9 @@ class _CommodityListPageState extends State<CommodityListPage> {
   void _openFilterSheet() {
     String tmpItemtype = _filterItemtype;
     String tmpPricetype = _filterPricetype;
-    String tmpItemstatus = _filterItemstatus;
+    // 商品状态多选：由逗号分隔字符串解析为列表
+    List<String> tmpItemstatus =
+        _filterItemstatus.isEmpty ? [] : _filterItemstatus.split(',').toList();
 
     showModalBottomSheet<void>(
       context: context,
@@ -349,7 +371,7 @@ class _CommodityListPageState extends State<CommodityListPage> {
                             }).toList(),
                           ),
                           const SizedBox(height: 20),
-                          // 商品状态
+                          // 商品状态（多选：点选切换勾选，「全部」清空已选）
                           const Text('商品状态',
                               style: TextStyle(
                                   fontSize: 14,
@@ -360,9 +382,21 @@ class _CommodityListPageState extends State<CommodityListPage> {
                             spacing: 8,
                             runSpacing: 8,
                             children: _itemStatuses.map((t) {
-                              final selected = t['value'] == tmpItemstatus;
+                              final value = t['value']!;
+                              // 「全部」在无勾选项时选中，其余按是否在列表中判断
+                              final selected = value.isEmpty
+                                  ? tmpItemstatus.isEmpty
+                                  : tmpItemstatus.contains(value);
                               return GestureDetector(
-                                onTap: () => setSheetState(() => tmpItemstatus = t['value']!),
+                                onTap: () => setSheetState(() {
+                                  if (value.isEmpty) {
+                                    tmpItemstatus = [];
+                                  } else if (tmpItemstatus.contains(value)) {
+                                    tmpItemstatus.remove(value);
+                                  } else {
+                                    tmpItemstatus.add(value);
+                                  }
+                                }),
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                                   decoration: BoxDecoration(
@@ -403,7 +437,7 @@ class _CommodityListPageState extends State<CommodityListPage> {
                               setSheetState(() {
                                 tmpItemtype = '';
                                 tmpPricetype = '';
-                                tmpItemstatus = '';
+                                tmpItemstatus = [];
                               });
                             },
                             child: Container(
@@ -425,7 +459,8 @@ class _CommodityListPageState extends State<CommodityListPage> {
                               setState(() {
                                 _filterItemtype = tmpItemtype;
                                 _filterPricetype = tmpPricetype;
-                                _filterItemstatus = tmpItemstatus;
+                                // 多选商品状态拼接为 '1,2' 格式传参
+                                _filterItemstatus = tmpItemstatus.join(',');
                                 _page = 1;
                                 _list = [];
                                 _hasMore = true;
@@ -787,6 +822,7 @@ class _CommodityListPageState extends State<CommodityListPage> {
                     child: _CommodityCard(
                       item: _list[index],
                       inpriceflag: _inpriceflag,
+                      checkstockflag: _checkstockflag,
                       onTap: () async {
                         final refresh = await Navigator.push<bool>(
                           context,
@@ -812,12 +848,16 @@ class _CommodityCard extends StatelessWidget {
   const _CommodityCard({
     required this.item,
     required this.inpriceflag,
+    required this.checkstockflag,
     required this.onTap,
   });
   final Map<String, dynamic> item;
 
   /// 进价查看权限：1 展示进价，否则展示 ***（对齐小程序 user.inpriceflag）
   final int inpriceflag;
+
+  /// 库存查看权限：1 展示库存，否则隐藏（对齐小程序 user.checkstockflag）
+  final int checkstockflag;
   final VoidCallback onTap;
 
   @override
@@ -830,7 +870,9 @@ class _CommodityCard extends StatelessWidget {
     final stock = MathUtils.formatDecimal(1, item['allstockqty'] ?? item['stock']);
     final inprice = MathUtils.formatDecimal(2, item['inprice']);
     final pfprice1 = MathUtils.formatDecimal(2, item['pfprice1']);
+    final mprice1 = MathUtils.formatDecimal(2, item['mprice1']);
     final shelves = item['shelves']?.toString() ?? '';
+    const TextStyle infoStyle = TextStyle(fontSize: 12, color: Color(0xFF7A7A7A));
 
     // 图片 URL 处理
     final String imagePath =
@@ -864,35 +906,33 @@ class _CommodityCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(6),
                   border: Border.all(color: const Color(0xFFEEEEEE), width: 0.5),
                 ),
+                padding: const EdgeInsets.all(3),
                 child: imageUrl.isNotEmpty
-                    ? ClipRRect(
-                        borderRadius: BorderRadius.circular(6),
-                        child: Image.network(
-                          imageUrl,
-                          width: 84,
-                          height: 84,
-                          cacheWidth: 168,
-                          cacheHeight: 168,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => const Center(
-                            child: Icon(Icons.image_not_supported_outlined,
-                                size: 28, color: Color(0xFFD1D5DB)),
-                          ),
+                    ? Image.network(
+                        imageUrl,
+                        width: 78,
+                        height: 78,
+                        cacheWidth: 156,
+                        cacheHeight: 156,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const Center(
+                          child: Icon(Icons.image_not_supported_outlined,
+                              size: 26, color: Color(0xFFD1D5DB)),
                         ),
                       )
                     : const Center(
-                        child: Icon(Icons.image_outlined, size: 28, color: Color(0xFFD1D5DB)),
+                        child: Icon(Icons.image_outlined, size: 26, color: Color(0xFFD1D5DB)),
                       ),
               ),
               const SizedBox(width: 10),
-              // 右侧文本内容（对齐小程序 product-info：4行 space-between）
+              // 右侧文本内容（对齐小程序 product-info：名称 + 4 行左右分布）
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // 商品名称 + 规格
+                    // 商品名称
                     Text(
-                      name + (size.isNotEmpty ? '($size)' : ''),
+                      name,
                       style: const TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
@@ -902,67 +942,90 @@ class _CommodityCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                     const SizedBox(height: 6),
-                    // 条码 | 库存
+                    // 条码 | 规格
                     Row(
                       children: [
                         Expanded(
                           child: Text(
                             barcode,
-                            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                            style: infoStyle,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        Text(
-                          '库存：$stock',
-                          style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                        if (size.isNotEmpty)
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 140),
+                            child: Text(
+                              '规格 ：$size',
+                              style: infoStyle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    // 库存（有权限才显示）| 货位号
+                    Row(
+                      children: [
+                        if (checkstockflag == 1)
+                          Expanded(child: Text('库存 ：$stock', style: infoStyle)),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 140),
+                          child: Text(
+                            '货位号：$shelves',
+                            style: infoStyle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 4),
-                    // 货位号 | 进价
+                    // 进价（无权限显示 ***）| 零售价
                     Row(
                       children: [
                         Expanded(
                           child: Text(
-                            '货位号：$shelves',
-                            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                            inpriceflag == 1 ? '进价 ：$inprice' : '进价 ：***',
+                            style: infoStyle,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        Text(
-                          inpriceflag == 1 ? '进价：$inprice' : '进价：***',
-                          style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+                        RichText(
+                          text: TextSpan(
+                            style: infoStyle,
+                            children: [
+                              const TextSpan(text: '零售价：'),
+                              TextSpan(
+                                text: sellprice,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFFF3B30),
+                                ),
+                              ),
+                              if (unit.isNotEmpty) TextSpan(text: '/$unit'),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 4),
-                    // 零售价 | 批发价
+                    // 批发价 | 会员价
                     Row(
                       children: [
                         Expanded(
-                          child: RichText(
-                            text: TextSpan(
-                              style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                              children: [
-                                const TextSpan(text: '零售价：'),
-                                TextSpan(
-                                  text: sellprice,
-                                  style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                      color: Color(0xFFFF3B30)),
-                                ),
-                                if (unit.isNotEmpty) TextSpan(text: '/$unit'),
-                              ],
-                            ),
+                          child: Text(
+                            '批发价 ：$pfprice1',
+                            style: infoStyle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        Text(
-                          '批发价：$pfprice1',
-                          style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
-                        ),
+                        Text('会员价 ：$mprice1', style: infoStyle),
                       ],
                     ),
                   ],

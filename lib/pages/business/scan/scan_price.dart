@@ -1,14 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
 import 'package:flutter_deer/res/constant.dart';
-import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/routers/fluro_navigator.dart';
+import 'package:flutter_deer/util/device_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/qr_code_scanner_page.dart';
+import 'package:sp_util/sp_util.dart';
 
 /// 扫码查价页面
 ///
@@ -29,13 +31,32 @@ class _ScanPricePageState extends State<ScanPricePage> {
   bool _hasError = false;
   String _errorMessage = '';
 
+  /// 进价查看权限（对齐小程序 index.vue loginParamResp.inpriceflag）
+  int _inpriceflag = 1;
+
+  /// 配送价查看权限（对齐小程序 index.vue user.pspriceflag）
+  int _pspriceflag = 1;
+
   @override
   void initState() {
     super.initState();
+    _loadUserFlags();
     _searchController.addListener(_onSearchChanged);
     _focusNode.addListener(() {
       if (mounted) setState(() {});
     });
+  }
+
+  /// 从用户信息读取进价查看权限（对齐小程序 loginParamResp.inpriceflag）
+  void _loadUserFlags() {
+    try {
+      final userStr = SpUtil.getString(Constant.user) ?? '';
+      if (userStr.isNotEmpty) {
+        final u = jsonDecode(userStr) as Map<String, dynamic>;
+        _inpriceflag = int.tryParse(u['inpriceflag']?.toString() ?? '1') ?? 1;
+        _pspriceflag = int.tryParse(u['pspriceflag']?.toString() ?? '1') ?? 1;
+      }
+    } catch (_) {}
   }
 
   @override
@@ -119,16 +140,14 @@ class _ScanPricePageState extends State<ScanPricePage> {
           'barcode': keyword,
           'field': 'barcode',
           'type': 'asc',
+          'showrealpriceflag': 1,
         },
       );
 
       if (!mounted) return;
 
       final data = result['data'];
-      final list = (data is Map<String, dynamic>
-              ? data['list']
-              : null) as List? ??
-          [];
+      final list = (data is Map<String, dynamic> ? data['list'] : null) as List? ?? [];
 
       if (list.isNotEmpty) {
         setState(() {
@@ -160,19 +179,18 @@ class _ScanPricePageState extends State<ScanPricePage> {
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new,
-              size: 18, color: Color(0xFF374151)),
+          icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
           onPressed: () => Navigator.pop(context),
         ),
-      title: const Text(
-        '扫码查价',
-        style: TextStyle(
-          fontSize: 17,
-          fontWeight: FontWeight.w600,
-          color: Color(0xFF111827),
+        title: const Text(
+          '扫码查价',
+          style: TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF111827),
+          ),
         ),
-      ),
-      centerTitle: true,
+        centerTitle: true,
       ),
       body: Column(
         children: [
@@ -189,17 +207,14 @@ class _ScanPricePageState extends State<ScanPricePage> {
                       color: const Color(0xFFF5F5F5),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
-                        color: _focusNode.hasFocus
-                            ? const Color(0xFF006EFF)
-                            : Colors.transparent,
+                        color: _focusNode.hasFocus ? const Color(0xFF006EFF) : Colors.transparent,
                         width: 1.5,
                       ),
                     ),
                     child: Row(
                       children: [
                         const SizedBox(width: 10),
-                        const Icon(Icons.search,
-                            size: 18, color: Color(0xFF9CA3AF)),
+                        const Icon(Icons.search, size: 18, color: Color(0xFF9CA3AF)),
                         const SizedBox(width: 6),
                         Flexible(
                           child: TextField(
@@ -207,18 +222,15 @@ class _ScanPricePageState extends State<ScanPricePage> {
                             focusNode: _focusNode,
                             autofocus: true,
                             keyboardType: TextInputType.number,
-                            style: const TextStyle(
-                                fontSize: 13, color: Color(0xFF111827)),
+                            style: const TextStyle(fontSize: 13, color: Color(0xFF111827)),
                             textInputAction: TextInputAction.search,
                             onSubmitted: (_) => _searchProduct(),
                             decoration: const InputDecoration(
                               hintText: '请将扫描枪对准商品条码',
-                              hintStyle: TextStyle(
-                                  fontSize: 13, color: Color(0xFF9CA3AF)),
+                              hintStyle: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
                               border: InputBorder.none,
                               isDense: true,
-                              contentPadding:
-                                  EdgeInsets.only(top: 12, bottom: 8),
+                              contentPadding: EdgeInsets.only(top: 12, bottom: 8),
                             ),
                           ),
                         ),
@@ -233,8 +245,7 @@ class _ScanPricePageState extends State<ScanPricePage> {
                               onTap: _clearInput,
                               child: const Padding(
                                 padding: EdgeInsets.symmetric(horizontal: 6),
-                                child: Icon(Icons.cancel,
-                                    size: 16, color: Color(0xFFBDBDBD)),
+                                child: Icon(Icons.cancel, size: 16, color: Color(0xFFBDBDBD)),
                               ),
                             );
                           },
@@ -244,8 +255,7 @@ class _ScanPricePageState extends State<ScanPricePage> {
                           onTap: _scanBarcode,
                           child: const Padding(
                             padding: EdgeInsets.symmetric(horizontal: 10),
-                            child:
-                                BossSvgIcon(svgFile: 'scan.svg', size: 20),
+                            child: BossSvgIcon(svgFile: 'scan.svg', size: 20),
                           ),
                         ),
                       ],
@@ -267,8 +277,7 @@ class _ScanPricePageState extends State<ScanPricePage> {
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.qr_code,
-                              size: 14, color: Color(0xFFFF6B00)),
+                          Icon(Icons.qr_code, size: 14, color: Color(0xFFFF6B00)),
                           SizedBox(width: 2),
                           Text(
                             '固定扫描',
@@ -291,9 +300,7 @@ class _ScanPricePageState extends State<ScanPricePage> {
             child: _isScanned
                 ? _hasError
                     ? _buildEmptyState()
-                    : (_productData != null
-                        ? _buildProductInfo()
-                        : _buildLoadingState())
+                    : (_productData != null ? _buildProductInfo() : _buildLoadingState())
                 : _buildDefaultState(),
           ),
         ],
@@ -303,17 +310,17 @@ class _ScanPricePageState extends State<ScanPricePage> {
 
   // ──────────── 未扫码状态 ────────────
   Widget _buildDefaultState() {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           BossSvgIcon(
             svgFile: 'saoma.svg',
             size: 100,
-            color: const Color(0xFFD1D5DB),
+            color: Color(0xFFD1D5DB),
           ),
-          const SizedBox(height: 20),
-          const Text(
+          SizedBox(height: 20),
+          Text(
             '扫码查价',
             style: TextStyle(
               fontSize: 18,
@@ -321,8 +328,8 @@ class _ScanPricePageState extends State<ScanPricePage> {
               color: Color(0xFF111827),
             ),
           ),
-          const SizedBox(height: 8),
-          const Text(
+          SizedBox(height: 8),
+          Text(
             '请扫描商品条码查询价格',
             style: TextStyle(
               fontSize: 14,
@@ -336,11 +343,11 @@ class _ScanPricePageState extends State<ScanPricePage> {
 
   // ──────────── 加载状态 ────────────
   Widget _buildLoadingState() {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const SizedBox(
+          SizedBox(
             width: 40,
             height: 40,
             child: CircularProgressIndicator(
@@ -348,8 +355,8 @@ class _ScanPricePageState extends State<ScanPricePage> {
               color: Color(0xFF006EFF),
             ),
           ),
-          const SizedBox(height: 16),
-          const Text(
+          SizedBox(height: 16),
+          Text(
             '正在查询商品...',
             style: TextStyle(
               fontSize: 14,
@@ -367,10 +374,10 @@ class _ScanPricePageState extends State<ScanPricePage> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          BossSvgIcon(
+          const BossSvgIcon(
             svgFile: 'wushuju.svg',
             size: 100,
-            color: const Color(0xFFD1D5DB),
+            color: Color(0xFFD1D5DB),
           ),
           const SizedBox(height: 20),
           const Text(
@@ -397,12 +404,12 @@ class _ScanPricePageState extends State<ScanPricePage> {
   // ──────────── 商品信息展示 ────────────
   Widget _buildProductInfo() {
     final product = _productData!;
-      final productName = _getProductName(product);
-      final unit = _getUnit(product);
-      final barcode = _getBarcode(product);
-      final spec = _getSpec(product);
-      final costPrice = _getCostPrice(product);
-      final imageUrl = _getImageUrl(product);
+    final productName = _getProductName(product);
+    final unit = _getUnit(product);
+    final barcode = _getBarcode(product);
+    final spec = _getSpec(product);
+    final costPrice = _getCostPrice(product);
+    final imageUrl = _getImageUrl(product);
 
     return ListView(
       padding: const EdgeInsets.all(12),
@@ -422,7 +429,8 @@ class _ScanPricePageState extends State<ScanPricePage> {
   }
 
   // ──────────── 商品卡片 ────────────
-  Widget _buildProductCard(String name, String unit, String barcode, String spec, String costPrice, String imageUrl) {
+  Widget _buildProductCard(
+      String name, String unit, String barcode, String spec, String costPrice, String imageUrl) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -453,14 +461,12 @@ class _ScanPricePageState extends State<ScanPricePage> {
                       cacheHeight: 140,
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) => const Center(
-                        child: Icon(Icons.inventory_2_outlined,
-                            size: 32, color: Color(0xFF9CA3AF)),
+                        child: Icon(Icons.inventory_2_outlined, size: 32, color: Color(0xFF9CA3AF)),
                       ),
                     ),
                   )
                 : const Center(
-                    child: Icon(Icons.inventory_2_outlined,
-                        size: 32, color: Color(0xFF9CA3AF)),
+                    child: Icon(Icons.inventory_2_outlined, size: 32, color: Color(0xFF9CA3AF)),
                   ),
           ),
           const SizedBox(width: 12),
@@ -497,26 +503,22 @@ class _ScanPricePageState extends State<ScanPricePage> {
                 Row(
                   children: [
                     Text('条码: $barcode',
-                        style: const TextStyle(
-                            fontSize: 12, color: Color(0xFF7A7A7A))),
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A))),
                   ],
                 ),
                 const SizedBox(height: 4),
                 Row(
                   children: [
                     Text('规格: ${spec.isEmpty ? "---" : spec}',
-                        style: const TextStyle(
-                            fontSize: 12, color: Color(0xFF7A7A7A))),
+                        style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A))),
                   ],
                 ),
                 const SizedBox(height: 4),
                 Row(
                   children: [
-                    Text('进价: $costPrice',
+                    Text('进价: ${_inpriceflag == 1 ? costPrice : "***"}',
                         style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF006EFF))),
+                            fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF006EFF))),
                   ],
                 ),
               ],
@@ -587,10 +589,8 @@ class _ScanPricePageState extends State<ScanPricePage> {
 
   // ──────────── 数据提取 ────────────
   String _getImageUrl(Map<String, dynamic> item) {
-    final path = item['imageurl']?.toString() ??
-        item['imgurl']?.toString() ??
-        item['pic']?.toString() ??
-        '';
+    final path =
+        item['imageurl']?.toString() ?? item['imgurl']?.toString() ?? item['pic']?.toString() ?? '';
     if (path.isEmpty) return '';
     if (path.startsWith('http://') || path.startsWith('https://')) return path;
     return '${Constant.imageBaseUrl}/$path';
@@ -608,9 +608,7 @@ class _ScanPricePageState extends State<ScanPricePage> {
   }
 
   String _getBarcode(Map<String, dynamic> item) {
-    return item['barcode']?.toString() ??
-        item['itemcode']?.toString() ??
-        '---';
+    return item['barcode']?.toString() ?? item['itemcode']?.toString() ?? '---';
   }
 
   String _getSpec(Map<String, dynamic> item) {
@@ -633,13 +631,21 @@ class _ScanPricePageState extends State<ScanPricePage> {
   List<_PriceItem> _getRetailPrices(Map<String, dynamic> item) {
     final prices = <_PriceItem>[];
 
-    // 零售价
-    final lsprice = item['lsprice']?.toString() ??
-        item['sellprice']?.toString() ??
-        '0';
+    // 档案零售价
+    final lsprice = item['lsprice']?.toString() ?? item['sellprice']?.toString() ?? '0';
     final lsVal = double.tryParse(lsprice) ?? 0;
     if (lsVal > 0) {
-      prices.add(_PriceItem('零售价', lsVal.toStringAsFixed(2)));
+      prices.add(_PriceItem('档案零售价', lsVal.toStringAsFixed(2)));
+    }
+
+    // 实时零售价：realprice 为 0 / 空 / 大于 sellprice 时取 sellprice
+    final sellVal = double.tryParse(item['sellprice']?.toString() ?? '0') ?? 0;
+    double realVal = double.tryParse(item['realprice']?.toString() ?? '0') ?? 0;
+    if (realVal == 0 || realVal > sellVal) {
+      realVal = sellVal;
+    }
+    if (realVal > 0) {
+      prices.add(_PriceItem('实时零售价', realVal.toStringAsFixed(2)));
     }
 
     // 会员价
@@ -682,11 +688,11 @@ class _ScanPricePageState extends State<ScanPricePage> {
       prices.add(_PriceItem('最低售价', minVal.toStringAsFixed(2)));
     }
 
-    // 配送价
+    // 配送价（需校验“允许查看配送价”权限，对齐小程序端无权限展示 ***）
     final psprice = item['psprice']?.toString() ?? '0';
     final psVal = double.tryParse(psprice) ?? 0;
     if (psVal > 0) {
-      prices.add(_PriceItem('配送价', psVal.toStringAsFixed(2)));
+      prices.add(_PriceItem('配送价', _pspriceflag == 1 ? psVal.toStringAsFixed(2) : '***'));
     }
 
     return prices;
@@ -695,8 +701,7 @@ class _ScanPricePageState extends State<ScanPricePage> {
 
 // ──────────── 数据模型 ────────────
 class _PriceItem {
+  _PriceItem(this.label, this.value);
   final String label;
   final String value;
-
-  _PriceItem(this.label, this.value);
 }

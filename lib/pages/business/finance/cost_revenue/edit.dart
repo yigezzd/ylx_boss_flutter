@@ -10,6 +10,7 @@ import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/common_select_sheet.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
+import 'package:flutter_deer/widgets/unsaved_changes_dialog.dart';
 import 'package:sp_util/sp_util.dart';
 
 /// 费用收支单编辑页 —— 对齐 boss 项目 costRevenueExpensesEdit.vue
@@ -28,6 +29,9 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
   bool _loading = false;
   bool _saving = false;
   Map<String, dynamic> _formData = {};
+
+  /// 表单快照：返回时检测未保存修改的比对基准
+  String _formSnapshot = '';
 
   // ── 多级审批 ──
   List<Map<String, dynamic>> _reviewFlowUsers = [];
@@ -99,6 +103,7 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
       }
     } catch (_) {}
     if (_isEdit) _loadData();
+    _refreshSnapshot();
   }
 
   @override
@@ -142,6 +147,7 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
           _reviewFlowUsers = _parseReviewList(data['reviewFlowUsers']);
           _reviewBillFlows = _parseReviewList(data['reviewBillFlows']);
         });
+        _refreshSnapshot();
       }
     } catch (_) {
       if (mounted) Toast.show('加载失败');
@@ -395,7 +401,48 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
     };
   }
 
-  Future<void> _handleSave([int sign = 0]) async {
+  // =================== 返回与未保存修改检测 ===================
+
+  /// 生成当前表单快照（拼接所有用户可修改字段，用于返回时比对是否改动）
+  String _buildSnapshot() {
+    return [
+      _bsid,
+      _billtype.toString(),
+      _feeitem,
+      _handlerid,
+      _payway,
+      _bankid,
+      _bankidother,
+      _paytime,
+      _remarkCtl.text,
+      _payamtCtl.text,
+    ].join('|');
+  }
+
+  /// 刷新快照（数据加载/保存完成后调用，作为改动比对基准）
+  void _refreshSnapshot() {
+    _formSnapshot = _buildSnapshot();
+  }
+
+  /// 是否存在未保存的修改
+  bool get _isDirty => _buildSnapshot() != _formSnapshot;
+
+  /// 返回统一入口：存在未保存修改时弹出「确认保存吗」弹窗
+  Future<void> _onBackPressed() async {
+    if (!_isDirty) {
+      if (mounted) Navigator.pop(context, true);
+      return;
+    }
+    final result = await showUnsavedChangesDialog(context);
+    if (result ?? false) {
+      // 选择保存：校验/保存失败时留在当前页并提示
+      await _handleSave(popAfterSave: true);
+    } else if (result == false) {
+      if (mounted) Navigator.pop(context, true);
+    }
+  }
+
+  Future<void> _handleSave({int sign = 0, bool popAfterSave = false}) async {
     if (_isEdit) {
       if (!PermissionUtils.checkPermission('015504', showTip: false)) {
         Toast.show('你无权编辑费用收支单，请在后台修改权限');
@@ -430,6 +477,10 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
         if (sign == 1) {
           _handleSignAfterSave(data is Map<String, dynamic> ? data : null);
         }
+        // 保存成功后刷新快照，避免返回时误报未保存
+        _refreshSnapshot();
+        // 返回时确认保存的场景：保存成功后返回上一页；普通保存仍留在当前页（对齐 Vue 行为）
+        if (popAfterSave && sign == 0 && mounted) Navigator.pop(context, true);
       }
     } catch (_) {
       if (mounted) Toast.show('保存失败');
@@ -634,7 +685,7 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
     setState(() {
       _formData['reviewsignflag'] = '2';
     });
-    await _handleSave(1);
+    await _handleSave(sign: 1);
   }
 
   String _buildBillid() {
@@ -675,7 +726,7 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
       statusColor = const Color(0xFFD54B5A);
     }
 
-    return Scaffold(
+    final Widget page = Scaffold(
       backgroundColor: const Color(0xFFF5F7FA),
       appBar: AppBar(
         backgroundColor: Colors.white,
@@ -688,7 +739,7 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
         leadingWidth: 40,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Color(0xFF374151)),
-          onPressed: () => Navigator.pop(context, true),
+          onPressed: _onBackPressed,
         ),
       ),
       body: _loading
@@ -745,6 +796,13 @@ class _CostRevenueEditPageState extends State<CostRevenueEditPage> {
               ]),
             ),
       bottomNavigationBar: _buildBottomBar(),
+    );
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _onBackPressed();
+      },
+      child: page,
     );
   }
 

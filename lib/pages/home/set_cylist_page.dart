@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
+import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:reorderables/reorderables.dart';
@@ -41,9 +42,41 @@ class _SetCyListPageState extends State<SetCyListPage> {
   @override
   void initState() {
     super.initState();
-    _selectedList = List<CyModuleItem>.from(widget.initialSelected ?? SetCyListPage.defaultList);
+    _selectedList = _filterAllowed(widget.initialSelected ?? SetCyListPage.defaultList);
     _initShowMap();
     _loadConfig();
+  }
+
+  /// 仅保留可选列表中存在的模块（对齐 Vue setCYList 的 filterSelectedList）：
+  /// 无权限 / 门店类型限制 / WMS 未开通的模块不出现在已选列表中，
+  /// 并通过可选列表回填 menuId，保证保存数据可被业务 Tab 二次校验。
+  List<CyModuleItem> _filterAllowed(List<CyModuleItem> list) {
+    final Map<String, CyModuleItem> allowed = <String, CyModuleItem>{
+      for (final item in widget.allModules) item.title: item,
+    };
+    final List<CyModuleItem> result = <CyModuleItem>[];
+    for (final item in list) {
+      final CyModuleItem? matched = allowed[item.title];
+      if (matched == null) {
+        continue;
+      }
+      // 防御性校验：当前无权限的模块一并移除
+      if (matched.menuId.isNotEmpty && !PermissionUtils.hasPermission(matched.menuId)) {
+        continue;
+      }
+      // 历史数据可能存在重复项，按标题去重
+      if (result.any((e) => e.title == matched.title)) {
+        continue;
+      }
+      result.add(
+        CyModuleItem(
+          title: item.title,
+          svgFile: item.svgFile.isNotEmpty ? item.svgFile : matched.svgFile,
+          menuId: matched.menuId,
+        ),
+      );
+    }
+    return result;
   }
 
   void _initShowMap() {
@@ -61,12 +94,11 @@ class _SetCyListPageState extends State<SetCyListPage> {
       if (menujson != null && menujson.isNotEmpty) {
         final dynamic decoded = jsonDecode(menujson);
         if (decoded is List) {
-          _selectedList = decoded
-              .map((e) => CyModuleItem(
-                    title: e['tit']?.toString() ?? '',
-                    svgFile: e['img']?.toString() ?? '',
-                  ))
-              .toList();
+          // 服务器配置同样需要剔除无权限模块，避免顶部已选区出现不可用入口
+          _selectedList = _filterAllowed(decoded
+              .whereType<Map<dynamic, dynamic>>()
+              .map((e) => CyModuleItem.fromJson(Map<String, dynamic>.from(e)))
+              .toList());
           _initShowMap();
         }
       }
@@ -103,7 +135,8 @@ class _SetCyListPageState extends State<SetCyListPage> {
 
   void _handleReset() {
     setState(() {
-      _selectedList = List<CyModuleItem>.from(SetCyListPage.defaultList);
+      // 默认列表同样按权限过滤，避免恢复出无权限模块
+      _selectedList = _filterAllowed(SetCyListPage.defaultList);
       _initShowMap();
     });
   }
@@ -113,8 +146,8 @@ class _SetCyListPageState extends State<SetCyListPage> {
     setState(() => _saving = true);
 
     try {
-      final menujson =
-          jsonEncode(_selectedList.map((e) => {'tit': e.title, 'img': e.svgFile}).toList());
+      // 与 Vue 端保持一致：持久化 tit / img / menuid，便于业务 Tab 再次校验
+      final menujson = jsonEncode(_selectedList.map((e) => e.toJson()).toList());
       await request(
         HttpApi.menuCommonSaveMenuCommon,
         {'menujson': menujson},
@@ -205,7 +238,8 @@ class _SetCyListPageState extends State<SetCyListPage> {
                   });
                 },
                 children: [
-                  for (int i = 0; i < _selectedList.length; i++) _buildSelectedItem(i, itemWidth),
+                  for (int i = 0; i < _selectedList.length; i++)
+                    RepaintBoundary(child: _buildSelectedItem(i, itemWidth)),
                 ],
               );
             },
@@ -287,24 +321,16 @@ class _SetCyListPageState extends State<SetCyListPage> {
 
   Widget _buildModuleList() {
     return ListView.builder(
+      // 低端设备滑动优化：提前渲染屏幕外列表项
+      cacheExtent: 800,
       itemCount: widget.allModules.length,
       itemBuilder: (context, index) {
         final item = widget.allModules[index];
-        final isOn = _showMap[item.title] ?? false;
-        return Container(
-          color: Colors.white,
-          margin: const EdgeInsets.only(bottom: 1),
-          child: ListTile(
-            leading: BossSvgIcon(svgFile: item.svgFile, size: 28),
-            title: Text(
-              item.title,
-              style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
-            ),
-            trailing: Switch.adaptive(
-              value: isOn,
-              onChanged: (v) => _handleToggle(item, v),
-              activeColor: const Color(0xFF3B82F6),
-            ),
+        return RepaintBoundary(
+          child: _CyModuleTile(
+            item: item,
+            isOn: _showMap[item.title] ?? false,
+            onChanged: (v) => _handleToggle(item, v),
           ),
         );
       },
@@ -364,19 +390,52 @@ class _SetCyListPageState extends State<SetCyListPage> {
   }
 }
 
+/// 待选模块列表项（独立 Widget + RepaintBoundary，降低列表重绘开销）
+class _CyModuleTile extends StatelessWidget {
+  const _CyModuleTile({required this.item, required this.isOn, required this.onChanged});
+
+  final CyModuleItem item;
+  final bool isOn;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      margin: const EdgeInsets.only(bottom: 1),
+      child: ListTile(
+        leading: BossSvgIcon(svgFile: item.svgFile, size: 28),
+        title: Text(
+          item.title,
+          style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
+        ),
+        trailing: Switch.adaptive(
+          value: isOn,
+          onChanged: onChanged,
+          activeColor: const Color(0xFF3B82F6),
+        ),
+      ),
+    );
+  }
+}
+
 /// 常用功能模块项
 class CyModuleItem {
-  const CyModuleItem({required this.title, required this.svgFile});
+  const CyModuleItem({required this.title, required this.svgFile, this.menuId = ''});
 
   factory CyModuleItem.fromJson(Map<String, dynamic> json) {
     return CyModuleItem(
       title: json['tit']?.toString() ?? '',
       svgFile: json['img']?.toString() ?? '',
+      menuId: json['menuid']?.toString() ?? '',
     );
   }
 
   final String title;
   final String svgFile;
 
-  Map<String, dynamic> toJson() => {'tit': title, 'img': svgFile};
+  /// 权限菜单 ID（对齐 boss 项目 menuid；为空时不校验）
+  final String menuId;
+
+  Map<String, dynamic> toJson() => {'tit': title, 'img': svgFile, 'menuid': menuId};
 }

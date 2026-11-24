@@ -11,6 +11,7 @@ import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/util/file_log_writer.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/review_config_utils.dart';
+import 'package:flutter_deer/util/review_nav_state.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:flutter_deer/widgets/date_picker_sheet.dart';
@@ -68,7 +69,8 @@ class _AllotApplyListPageState extends State<AllotApplyListPage>
 
     // 同步创建默认3个Tab（不含"已驳回"），确保首次 build 时 TabBar 的 controller 非空，
     // 避免 TabBar 隐式使用 DefaultTabController 触发 _dependencies 断言失败
-    _tabController = TabController(length: 3, vsync: this);
+    _statusIndex = ReviewNavState.consumePendingStatusIndex();
+    _tabController = TabController(length: 3, vsync: this, initialIndex: _statusIndex);
     _tabController!.addListener(_onTabChanged);
 
     final now = DateTime.now();

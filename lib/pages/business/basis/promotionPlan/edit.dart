@@ -67,6 +67,11 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
   bool _scanFieldFocused = false;
   bool _scanBusy = false;
 
+  /// 商品卡片内价格输入框焦点与控制器：明细行 → [特价, 促销进货价, 促销联营扣率]
+  /// 以行对象为键缓存，避免 rebuild 重建丢失焦点；删除/排序后也不会错配
+  final Map<Map<String, dynamic>, List<FocusNode>> _priceFocusNodes = {};
+  final Map<Map<String, dynamic>, List<TextEditingController>> _priceCtrls = {};
+
   /// 吸顶区高度常量（对齐采购订货粘性表头）：扫码框区域 + 明细标题栏，区块固定高度确保总高精确无间隙
   static const double _scanStickyHeight = 68.0;
   static const double _stickyTitleHeight = 40.0;
@@ -186,6 +191,18 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
   void dispose() {
     _billnameCtrl.dispose();
     _scrollCtrl.dispose();
+    for (final nodes in _priceFocusNodes.values) {
+      for (final node in nodes) {
+        node.dispose();
+      }
+    }
+    _priceFocusNodes.clear();
+    for (final ctrls in _priceCtrls.values) {
+      for (final ctrl in ctrls) {
+        ctrl.dispose();
+      }
+    }
+    _priceCtrls.clear();
     _scanDebounceTimer?.cancel();
     _scanController.dispose();
     _scanFocusNode.dispose();
@@ -418,6 +435,52 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
     if (!mounted) return;
     _scanFocusNode.requestFocus();
     SystemChannels.textInput.invokeMethod('TextInput.hide');
+  }
+
+  /// 取当前商品卡片三个价格输入框的焦点节点（首次访问时创建），控制器同步缓存在 _priceCtrls 中；
+  /// 聚焦时全选文本（参考采购入库单 _addOnFocusSelectAll）；
+  /// 促销联营扣率为卡片最后一项：失焦后焦点回到扫码框，便于直接扫下一个商品
+  List<FocusNode> _priceFieldsOf(Map<String, dynamic> item) {
+    return _priceFocusNodes.putIfAbsent(item, () {
+      final nodes = List<FocusNode>.generate(3, (_) => FocusNode());
+      final ctrls = List<TextEditingController>.generate(3, (_) => TextEditingController());
+      _priceCtrls[item] = ctrls;
+      for (var i = 0; i < nodes.length; i++) {
+        _addOnFocusSelectAll(nodes[i], ctrls[i]);
+      }
+      nodes[2].addListener(() {
+        if (nodes[2].hasFocus) {
+          return;
+        }
+        _focusScanInput();
+      });
+      return nodes;
+    });
+  }
+
+  /// 聚焦后全选文本（参考采购入库单 _addOnFocusSelectAll），便于直接重输覆盖
+  void _addOnFocusSelectAll(FocusNode node, TextEditingController controller) {
+    node.addListener(() {
+      if (node.hasFocus && controller.text.isNotEmpty) {
+        controller.selection = TextSelection(baseOffset: 0, extentOffset: controller.text.length);
+      }
+    });
+  }
+
+  /// 焦点回到扫码枪输入框（参考采购入库单 _focusAfterScan）：帧后聚焦并隐藏软键盘；
+  /// 焦点已落在其它具体控件（如点了另一输入框）时不抢占
+  void _focusScanInput() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _scanFocusNode.hasFocus) {
+        return;
+      }
+      final primary = FocusManager.instance.primaryFocus;
+      if (primary != null && primary is! FocusScopeNode) {
+        return;
+      }
+      _scanFocusNode.requestFocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    });
   }
 
   /// 扫码枪输入框（与门店调价单一致：白色圆角卡片包裹）
@@ -1071,6 +1134,36 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
     }
   }
 
+  // =================== 终止（对齐 Web changeStatus → pt/master/statuscp, status=2） ===================
+  Future<void> _terminate() async {
+    if (_billid.isEmpty) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('提示'),
+        content: const Text('确定终止该促销调价单吗？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确定')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    try {
+      final result = await request(HttpApi.promotionPlanStatus, {
+        'statusCpReq': {
+          'billids': [_billid],
+          'status': 2,
+        },
+      });
+      Toast.show(result['retmsg'] as String? ?? '终止成功');
+      await _getInfo({'billid': _billid});
+      if (mounted) setState(() {});
+    } catch (e) {
+      Toast.show('终止失败：$e');
+    }
+  }
+
   // =================== 复制并新增 ===================
   Future<void> _copyAndNew() async {
     final confirm = await showDialog<bool>(
@@ -1604,6 +1697,8 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
     final itempromotionflag = item['itempromotionflag']?.toString() == '1' ||
         item['itempromotionflag'] == true ||
         item['itempromotionflag'] == 1;
+    final priceNodes = _priceFieldsOf(item);
+    final priceCtrls = _priceCtrls[item]!;
 
     return Container(
       margin: const EdgeInsets.only(top: 8),
@@ -1665,14 +1760,17 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
             ),
           ),
           const Divider(height: 1, color: Color(0xFFE5E7EB)),
-          // 特价
-          _buildPriceInputRow('特价', item, 'dcprice', 2),
+          // 特价 → 促销进货价 → 促销联营扣率 依次流转焦点（联营扣率失焦后回到扫码框）
+          _buildPriceInputRow('特价', item, 'dcprice', 2,
+              focusNode: priceNodes[0], controller: priceCtrls[0], nextFocusNode: priceNodes[1]),
           const Divider(height: 1, color: Color(0xFFF3F4F6)),
           // 促销进货价
-          _buildPriceInputRow('促销进货价', item, 'promotioninprice', 2),
+          _buildPriceInputRow('促销进货价', item, 'promotioninprice', 2,
+              focusNode: priceNodes[1], controller: priceCtrls[1], nextFocusNode: priceNodes[2]),
           const Divider(height: 1, color: Color(0xFFF3F4F6)),
-          // 促销联营扣率
-          _buildPriceInputRow('促销联营扣率', item, 'promotionjoinrate', 2),
+          // 促销联营扣率（最后一项，失焦后回扫码框）
+          _buildPriceInputRow('促销联营扣率', item, 'promotionjoinrate', 2,
+              focusNode: priceNodes[2], controller: priceCtrls[2]),
           const Divider(height: 1, color: Color(0xFFF3F4F6)),
           // 参与特价折扣促销
           Padding(
@@ -1701,8 +1799,23 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
     );
   }
 
-  Widget _buildPriceInputRow(String label, Map<String, dynamic> item, String field, int scale) {
-    final ctrl = TextEditingController(text: item[field]?.toString() ?? '');
+  /// 价格输入行；focusNode/controller 由调用方按行缓存传入（保证聚焦全选与光标稳定），
+  /// nextFocusNode 串联焦点录入顺序（特价 → 促销进货价 → 促销联营扣率）
+  Widget _buildPriceInputRow(
+    String label,
+    Map<String, dynamic> item,
+    String field,
+    int scale, {
+    required FocusNode focusNode,
+    required TextEditingController controller,
+    FocusNode? nextFocusNode,
+  }) {
+    final ctrl = controller;
+    final value = item[field]?.toString() ?? '';
+    // 未聚焦时同步外部赋值（首次加载、重新扫码覆盖价格），聚焦中不打断用户输入
+    if (!focusNode.hasFocus && ctrl.text != value) {
+      ctrl.text = value;
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       child: Row(children: [
@@ -1715,12 +1828,19 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
             builder: (inputCtx) {
               return TextField(
                 controller: ctrl,
+                focusNode: focusNode,
                 enabled: !_disabled,
+                // 有下一项时回车键显示「下一项」，否则显示「完成」
+                textInputAction: nextFocusNode != null ? TextInputAction.next : TextInputAction.done,
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
                 textAlign: TextAlign.right,
                 // 键盘弹出时预留滚动余量，确保输入框完整露出不被遮挡
                 scrollPadding: const EdgeInsets.only(bottom: 120),
                 onTap: () {
+                  // 点击聚焦时同样全选（代码聚焦场景由 _addOnFocusSelectAll 处理）
+                  if (ctrl.text.isNotEmpty) {
+                    ctrl.selection = TextSelection(baseOffset: 0, extentOffset: ctrl.text.length);
+                  }
                   // 键盘弹出会压缩视口，等键盘动画结束后再滚动到输入框，
                   // 避免“点击时可见、键盘弹出后被遮挡”的时序问题
                   Future.delayed(const Duration(milliseconds: 350), () {
@@ -1759,6 +1879,8 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
                   final formatted = MathUtils.formatDecimal(scale, v);
                   setState(() => item[field] = formatted);
                   ctrl.text = formatted;
+                  // 录入完成后光标跳到下一项（参考采购入库单连续录入交互）
+                  nextFocusNode?.requestFocus();
                 },
                 onTapOutside: (_) {
                   final v = ctrl.text;
@@ -1839,7 +1961,7 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
       );
     }
 
-    // 已审核：复制并新增
+    // 已审核：终止（左，样式同删除按钮） + 复制并新增（右，主色）
     if (_isSigned) {
       return Container(
         padding: EdgeInsets.fromLTRB(12, 8, 12, bottom + 8),
@@ -1847,20 +1969,32 @@ class _PromotionPlanEditPageState extends State<PromotionPlanEditPage> {
           color: Colors.white,
           border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
         ),
-        child: SizedBox(
-          width: double.infinity,
-          child: ElevatedButton(
-            onPressed: _copyAndNew,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF006EFF),
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+        child: Row(children: [
+          Expanded(
+            child: OutlinedButton(
+              onPressed: _terminate,
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+              ),
+              child: const Text('终止'),
             ),
-            child: const Text('复制并新增'),
           ),
-        ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: ElevatedButton(
+              onPressed: _copyAndNew,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF006EFF),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                elevation: 0,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+              ),
+              child: const Text('复制并新增'),
+            ),
+          ),
+        ]),
       );
     }
 

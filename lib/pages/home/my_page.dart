@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_deer/net/http_api.dart';
 import 'package:flutter_deer/net/http_helper.dart';
 import 'package:flutter_deer/pages/user/about_page.dart';
 import 'package:flutter_deer/pages/user/dynamics_code_page.dart';
@@ -8,8 +10,10 @@ import 'package:flutter_deer/pages/user/settings_page.dart';
 import 'package:flutter_deer/pages/user/user_info_page.dart';
 import 'package:flutter_deer/res/constant.dart';
 import 'package:flutter_deer/util/log_upload_utils.dart';
+import 'package:flutter_deer/util/login_params_utils.dart';
 import 'package:flutter_deer/util/permission_utils.dart';
 import 'package:flutter_deer/util/toast_utils.dart';
+import 'package:flutter_deer/util/vas_utils.dart';
 import 'package:flutter_deer/util/version_check_utils.dart';
 import 'package:flutter_deer/widgets/boss_svg_icon.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -35,6 +39,17 @@ class _MyPageState extends State<MyPage> {
     super.initState();
     _loadUserInfo();
     _loadAppVersion();
+    // tabbar 切换时刷新席位信息（对齐 Vue user.vue onShow → fetchVasList）
+    unawaited(_refreshSeatInfo());
+  }
+
+  /// 拉取增值服务列表后刷新界面席位展示
+  /// （10s 节流 + 未登录不请求由 VasUtils 内置）
+  Future<void> _refreshSeatInfo() async {
+    await VasUtils.fetchVasList();
+    if (mounted) {
+      _loadUserInfo();
+    }
   }
 
   void _loadUserInfo() {
@@ -147,6 +162,53 @@ class _MyPageState extends State<MyPage> {
     );
   }
 
+  /// 解绑席位：确认后调用解绑接口，成功后刷新员工门店权限与席位数据
+  /// （对齐 Vue user.vue onUnbindSeat）
+  void _unbindSeat() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('提示'),
+        content: const Text('确认解绑当前席位吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _doUnbindSeat();
+            },
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _doUnbindSeat() async {
+    try {
+      // 参数为当前席位对象（对齐 Vue：http("/sysseat/unbindSeat", { ...vasObj.value })）
+      await request(HttpApi.sysSeatUnbindSeat, VasUtils.getSeatInfo());
+      if (!mounted) {
+        return;
+      }
+      Toast.show('解绑成功');
+      // 本地清空席位缓存（对齐 Vue：解绑后 setCookie("sysSeat", 接口返回 seat || {})）
+      SpUtil.putString(Constant.sysSeat, '{}');
+      // 解绑后重新拉取员工门店权限（user / store / rolemap / sysSeat）
+      await LoginParamsUtils.forceRefresh();
+      // 刷新增值服务列表（对齐 Vue fetchVasList({ verid: "701,704,712" })）
+      await VasUtils.fetchVasList(force: true);
+      if (mounted) {
+        _loadUserInfo();
+      }
+    } catch (_) {
+      // 接口异常时由 http_helper 统一 Toast 提示
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final String userName = _user['name']?.toString() ?? _user['username']?.toString() ?? '用户';
@@ -155,6 +217,14 @@ class _MyPageState extends State<MyPage> {
     final String orgName = _store['name']?.toString() ?? '';
     final String merchantId = _store['account']?.toString() ?? '';
     final String merchantName = _sysStoreAccount['name']?.toString() ?? '';
+
+    // 席位信息（对齐 Vue user.vue seatText / hasSeat）
+    final Map<String, dynamic> seat = VasUtils.getSeatInfo();
+    final String seatCode = seat['code']?.toString() ?? '';
+    final String seatDate = VasUtils.formatExpireDate(seat);
+    final bool hasSeat = seatCode.isNotEmpty;
+    final String seatText =
+        !hasSeat ? '未绑定' : (seatDate.isNotEmpty ? '$seatCode（$seatDate到期）' : seatCode);
 
     final String displayName = roleName.isNotEmpty ? '$userName-$roleName' : userName;
 
@@ -202,6 +272,8 @@ class _MyPageState extends State<MyPage> {
                           orgName,
                           merchantId,
                           merchantName,
+                          seatText,
+                          hasSeat,
                         ),
                         const SizedBox(height: 10),
                         _buildMenuCard(context),
@@ -303,11 +375,13 @@ class _MyPageState extends State<MyPage> {
     );
   }
 
-  /// 账户信息卡片（所属机构 / 商户编号 / 商户名称）
+  /// 账户信息卡片（所属机构 / 商户编号 / 商户名称 / 绑定席位）
   Widget _buildInfoCard(
     String orgName,
     String merchantId,
     String merchantName,
+    String seatText,
+    bool hasSeat,
   ) {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -323,12 +397,37 @@ class _MyPageState extends State<MyPage> {
           _buildInfoRow('商户编号', merchantId),
           const Divider(height: 1, indent: 16, endIndent: 16),
           _buildInfoRow('商户名称', merchantName),
+          // 临时屏蔽“绑定席位”行（含解绑入口），恢复时去掉 if 守卫即可
+          if (!VasUtils.hideSeatBind) ...[
+            const Divider(height: 1, indent: 16, endIndent: 16),
+            _buildInfoRow(
+              '绑定席位',
+              seatText,
+              trailing: hasSeat ? _buildUnbindSeatButton() : null,
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildInfoRow(String label, String value) {
+  /// 席位“解绑”操作按钮（对齐 Vue .seat-op：主色下划线文字）
+  Widget _buildUnbindSeatButton() {
+    return GestureDetector(
+      onTap: _unbindSeat,
+      child: const Text(
+        '解绑',
+        style: TextStyle(
+          fontSize: 14,
+          color: Color(0xFF3764FF),
+          decoration: TextDecoration.underline,
+          decorationColor: Color(0xFF3764FF),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value, {Widget? trailing}) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       child: Row(
@@ -349,6 +448,10 @@ class _MyPageState extends State<MyPage> {
               ),
             ),
           ),
+          if (trailing != null) ...[
+            const SizedBox(width: 12),
+            trailing,
+          ],
         ],
       ),
     );
